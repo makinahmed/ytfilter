@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 
 const API_KEY = 'AIzaSyCR7aNXAArVk2fS9mr3eGQRoPyQbG6wT6E';
 const DAILY_QUOTA = 10000;
@@ -625,17 +625,17 @@ export default function App() {
 		return arr;
 	}, [rawResults, minViews, maxViews, minSubs, maxSubs, keywords, sort]);
 
-	const fetchChannelSubs = async (channelId) => {
-		try {
-			const r = await fetch(
-				`https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelId}&key=${API_KEY}`
-			);
-			const d = await r.json();
-			return parseInt(d.items?.[0]?.statistics?.subscriberCount ?? -1);
-		} catch {
-			return -1;
-		}
-	};
+	// const fetchChannelSubs = async (channelId) => {
+	// 	try {
+	// 		const r = await fetch(
+	// 			`https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelId}&key=${API_KEY}`
+	// 		);
+	// 		const d = await r.json();
+	// 		return parseInt(d.items?.[0]?.statistics?.subscriberCount ?? -1);
+	// 	} catch {
+	// 		return -1;
+	// 	}
+	// };
 
 	const extractVideoId = (input) => {
 		input = input.trim();
