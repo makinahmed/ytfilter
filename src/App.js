@@ -38,7 +38,6 @@ const fmt = (n) => {
 const fmtK = fmt;
 const getTodayKey = () => new Date().toISOString().slice(0, 10);
 
-// ── Persistent quota via window.storage ───────────────────────────────────────
 const loadQuotaFromStorage = async () => {
 	try {
 		const result = await window.storage.get(QUOTA_KEY);
@@ -144,6 +143,21 @@ const getMatchScore = (v, searchQuery, filterKeywords) => {
 	return allKws.filter((k) => hay.includes(k)).length / allKws.length;
 };
 
+// ── Channel size helpers ──────────────────────────────────────────────────────
+const CHANNEL_SIZES = [
+	{ key: 'all', label: 'All Sizes', icon: '🌐', min: 0, max: Infinity },
+	{ key: 'small', label: 'Small', icon: '🌱', min: 0, max: 10_000 },
+	{ key: 'medium', label: 'Medium', icon: '📈', min: 10_000, max: 50_000 },
+	{ key: 'big', label: 'Big', icon: '🏆', min: 50_000, max: Infinity },
+];
+
+const getChannelSizeKey = (subs) => {
+	if (subs < 0) return null;
+	if (subs < 10_000) return 'small';
+	if (subs < 50_000) return 'medium';
+	return 'big';
+};
+
 // ── Themes ────────────────────────────────────────────────────────────────────
 const DARK = {
 	bg: '#07070f',
@@ -201,6 +215,23 @@ const DARK = {
 	lSubs: '#a78bfa',
 	lKw: '#34d399',
 	lSearch: '#6366f1',
+	// channel size chip colors
+	chipSmallBg: '#0c2a1a',
+	chipSmallText: '#34d399',
+	chipSmallBorder: '#165534',
+	chipMediumBg: '#1a1a07',
+	chipMediumText: '#f59e0b',
+	chipMediumBorder: '#55440a',
+	chipBigBg: '#1a0a2e',
+	chipBigText: '#a78bfa',
+	chipBigBorder: '#4c1d95',
+	chipAllBg: '#0d0d1a',
+	chipAllText: '#6366f1',
+	chipAllBorder: '#2a2a50',
+	// match sort
+	matchSortBg: '#0f0f20',
+	matchSortBorder: '#2a2a50',
+	matchSortActiveBg: '#1e1b4b',
 };
 const LIGHT = {
 	bg: '#f0f2fa',
@@ -258,6 +289,21 @@ const LIGHT = {
 	lSubs: '#7c3aed',
 	lKw: '#059669',
 	lSearch: '#4f46e5',
+	chipSmallBg: '#ecfdf5',
+	chipSmallText: '#065f46',
+	chipSmallBorder: '#a7f3d0',
+	chipMediumBg: '#fffbeb',
+	chipMediumText: '#92400e',
+	chipMediumBorder: '#fde68a',
+	chipBigBg: '#f5f3ff',
+	chipBigText: '#5b21b6',
+	chipBigBorder: '#ddd6fe',
+	chipAllBg: '#eef0fb',
+	chipAllText: '#4f46e5',
+	chipAllBorder: '#c7d2fe',
+	matchSortBg: '#f0f2fa',
+	matchSortBorder: '#c4c8e8',
+	matchSortActiveBg: '#ede9fe',
 };
 
 // ── QuotaCircle ───────────────────────────────────────────────────────────────
@@ -273,7 +319,6 @@ function QuotaCircle({ used, total, T }) {
 		const t = setInterval(() => setCountdown(getResetSeconds()), 1000);
 		return () => clearInterval(t);
 	}, []);
-
 	return (
 		<div
 			style={{
@@ -489,7 +534,76 @@ function SortBtn({ label, field, sortState, onSort, T, isDark }) {
 	);
 }
 
-function VideoRow({ v, idx, isHighlighted, T }) {
+// ── Match score pill inside row ───────────────────────────────────────────────
+function MatchScoreBadge({ score, T }) {
+	if (score <= 0) return null;
+	const pct = Math.round(score * 100);
+	const color = pct >= 75 ? '#22c55e' : pct >= 40 ? '#f59e0b' : '#94a3b8';
+	return (
+		<span
+			style={{
+				background: color + '22',
+				color,
+				border: `1px solid ${color}55`,
+				fontSize: 9,
+				padding: '1px 6px',
+				borderRadius: 4,
+				fontWeight: 700,
+				fontFamily: "'JetBrains Mono', monospace",
+				whiteSpace: 'nowrap',
+				flexShrink: 0,
+			}}
+		>
+			{pct}% match
+		</span>
+	);
+}
+
+// ── Channel size badge ────────────────────────────────────────────────────────
+function ChannelSizeBadge({ subs, T }) {
+	const key = getChannelSizeKey(subs);
+	if (!key) return null;
+	const cfg = {
+		small: {
+			label: '🌱 Small',
+			bg: T.chipSmallBg,
+			text: T.chipSmallText,
+			border: T.chipSmallBorder,
+		},
+		medium: {
+			label: '📈 Medium',
+			bg: T.chipMediumBg,
+			text: T.chipMediumText,
+			border: T.chipMediumBorder,
+		},
+		big: {
+			label: '🏆 Big',
+			bg: T.chipBigBg,
+			text: T.chipBigText,
+			border: T.chipBigBorder,
+		},
+	}[key];
+	return (
+		<span
+			style={{
+				background: cfg.bg,
+				color: cfg.text,
+				border: `1px solid ${cfg.border}`,
+				fontSize: 9,
+				padding: '1px 6px',
+				borderRadius: 4,
+				fontWeight: 700,
+				fontFamily: "'JetBrains Mono', monospace",
+				whiteSpace: 'nowrap',
+				flexShrink: 0,
+			}}
+		>
+			{cfg.label}
+		</span>
+	);
+}
+
+function VideoRow({ v, idx, isHighlighted, matchScore, T }) {
 	const url = `https://www.youtube.com/watch?v=${v.id}`;
 	const baseBg = idx % 2 === 0 ? T.rowEven : T.rowOdd;
 	const rowBg = isHighlighted ? T.rowHL : baseBg;
@@ -532,6 +646,7 @@ function VideoRow({ v, idx, isHighlighted, T }) {
 						alignItems: 'center',
 						gap: 6,
 						marginBottom: 3,
+						flexWrap: 'wrap',
 					}}
 				>
 					{isHighlighted && (
@@ -551,6 +666,7 @@ function VideoRow({ v, idx, isHighlighted, T }) {
 							✦ MATCH
 						</span>
 					)}
+					<MatchScoreBadge score={matchScore} T={T} />
 					<a
 						href={url}
 						target='_blank'
@@ -591,6 +707,7 @@ function VideoRow({ v, idx, isHighlighted, T }) {
 					>
 						📺 {v.channelTitle}
 					</div>
+					<ChannelSizeBadge subs={v.subscriberCount} T={T} />
 					{v.sourceKeyword && (
 						<span
 							style={{
@@ -647,6 +764,140 @@ function VideoRow({ v, idx, isHighlighted, T }) {
 	);
 }
 
+// ── Channel Size Filter Pills ─────────────────────────────────────────────────
+function ChannelSizeFilter({ value, onChange, T, counts }) {
+	return (
+		<div>
+			<label
+				style={{
+					color: T.accent4,
+					fontSize: 10,
+					fontWeight: 700,
+					display: 'block',
+					marginBottom: 6,
+					letterSpacing: 1,
+				}}
+			>
+				📡 CHANNEL SIZE
+			</label>
+			<div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+				{CHANNEL_SIZES.map(({ key, label, icon }) => {
+					const active = value === key;
+					const count = counts[key] ?? 0;
+					const styles = {
+						all: {
+							bg: T.chipAllBg,
+							text: T.chipAllText,
+							border: T.chipAllBorder,
+						},
+						small: {
+							bg: T.chipSmallBg,
+							text: T.chipSmallText,
+							border: T.chipSmallBorder,
+						},
+						medium: {
+							bg: T.chipMediumBg,
+							text: T.chipMediumText,
+							border: T.chipMediumBorder,
+						},
+						big: {
+							bg: T.chipBigBg,
+							text: T.chipBigText,
+							border: T.chipBigBorder,
+						},
+					}[key];
+					return (
+						<button
+							key={key}
+							onClick={() => onChange(key)}
+							style={{
+								background: active ? styles.bg : 'transparent',
+								color: active ? styles.text : T.textDim,
+								border: `1.5px solid ${active ? styles.border : T.border3}`,
+								borderRadius: 20,
+								padding: '4px 12px',
+								fontSize: 11,
+								cursor: 'pointer',
+								fontFamily: 'inherit',
+								fontWeight: active ? 700 : 400,
+								transition: 'all .15s',
+								display: 'flex',
+								alignItems: 'center',
+								gap: 5,
+								boxShadow: active ? `0 0 8px ${styles.border}66` : 'none',
+							}}
+						>
+							{icon} {label}
+							{count > 0 && (
+								<span
+									style={{
+										background: active ? styles.border : T.border3,
+										color: active ? styles.bg : T.textDim,
+										borderRadius: 10,
+										padding: '0 5px',
+										fontSize: 9,
+										fontFamily: "'JetBrains Mono', monospace",
+										fontWeight: 700,
+										minWidth: 16,
+										textAlign: 'center',
+									}}
+								>
+									{count}
+								</span>
+							)}
+						</button>
+					);
+				})}
+			</div>
+			<div style={{ marginTop: 5, color: T.textMid, fontSize: 9 }}>
+				🌱 Small: 0–10K &nbsp;·&nbsp; 📈 Medium: 10K–50K &nbsp;·&nbsp; 🏆 Big:
+				50K+
+			</div>
+		</div>
+	);
+}
+
+// ── Match Sort Control ────────────────────────────────────────────────────────
+function MatchSortControl({ value, onChange, T }) {
+	// value: null | 'desc' | 'asc'
+	const options = [
+		{ val: null, label: 'Default', icon: '—' },
+		{ val: 'desc', label: 'Best Match ↓', icon: '✦' },
+		{ val: 'asc', label: 'Worst Match ↑', icon: '◇' },
+	];
+	return (
+		<div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+			<span style={{ color: T.textDim, fontSize: 11 }}>Match:</span>
+			{options.map(({ val, label, icon }) => {
+				const active = value === val;
+				return (
+					<button
+						key={String(val)}
+						onClick={() => onChange(val)}
+						style={{
+							background: active
+								? T === DARK
+									? '#1e1b4b'
+									: '#ede9fe'
+								: 'transparent',
+							color: active ? T.accent2 : T.textDim,
+							border: `1px solid ${active ? T.accent2 : T.border3}`,
+							borderRadius: 6,
+							padding: '3px 9px',
+							fontSize: 11,
+							cursor: 'pointer',
+							fontFamily: "'JetBrains Mono', monospace",
+							transition: 'all .15s',
+						}}
+					>
+						{icon} {label}
+					</button>
+				);
+			})}
+		</div>
+	);
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
 	const [darkMode, setDarkMode] = useState(true);
@@ -676,6 +927,7 @@ export default function App() {
 	const [minSubs, setMinSubs] = useState('');
 	const [maxSubs, setMaxSubs] = useState('');
 	const [keywords, setKeywords] = useState('');
+	const [channelSizeFilter, setChannelSizeFilter] = useState('all');
 	const [rawResults, setRawResults] = useState([]);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState('');
@@ -683,11 +935,11 @@ export default function App() {
 	const [searched, setSearched] = useState(false);
 	const [allCopied, setAllCopied] = useState(false);
 	const [sort, setSort] = useState({ field: null, dir: null });
+	const [matchSort, setMatchSort] = useState(null); // null | 'desc' | 'asc'
 	const [quotaUsed, setQuotaUsed] = useState(0);
 	const [quotaLoaded, setQuotaLoaded] = useState(false);
 	const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
 
-	// Load quota from persistent storage on mount
 	useEffect(() => {
 		loadQuotaFromStorage().then((val) => {
 			setQuotaUsed(val);
@@ -710,6 +962,26 @@ export default function App() {
 			return { field: null, dir: null };
 		});
 
+	// Compute match scores for all raw results
+	const matchScores = useMemo(() => {
+		const map = {};
+		rawResults.forEach((v) => {
+			map[v.id] = getMatchScore(v, query, keywords);
+		});
+		return map;
+	}, [rawResults, query, keywords]);
+
+	// Count channel sizes for the filter badges
+	const channelSizeCounts = useMemo(() => {
+		const counts = { all: 0, small: 0, medium: 0, big: 0 };
+		rawResults.forEach((v) => {
+			const key = getChannelSizeKey(v.subscriberCount);
+			if (key) counts[key]++;
+		});
+		counts.all = rawResults.length;
+		return counts;
+	}, [rawResults]);
+
 	const results = useMemo(() => {
 		const kwList = keywords
 			.split(',')
@@ -724,24 +996,52 @@ export default function App() {
 				const hay = (v.title + ' ' + v.tags.join(' ')).toLowerCase();
 				if (!kwList.some((k) => hay.includes(k))) return false;
 			}
+			// Channel size filter
+			if (channelSizeFilter !== 'all') {
+				const size = CHANNEL_SIZES.find((s) => s.key === channelSizeFilter);
+				if (
+					size &&
+					(v.subscriberCount < size.min || v.subscriberCount >= size.max)
+				)
+					return false;
+			}
 			return true;
 		});
-		if (sort.field) {
+
+		// Sort priority: matchSort > views/subs sort
+		if (matchSort) {
+			arr = [...arr].sort((a, b) =>
+				matchSort === 'desc'
+					? (matchScores[b.id] ?? 0) - (matchScores[a.id] ?? 0)
+					: (matchScores[a.id] ?? 0) - (matchScores[b.id] ?? 0)
+			);
+		} else if (sort.field) {
 			const key = sort.field === 'views' ? 'viewCount' : 'subscriberCount';
 			arr = [...arr].sort((a, b) =>
 				sort.dir === 'desc' ? b[key] - a[key] : a[key] - b[key]
 			);
 		}
 		return arr;
-	}, [rawResults, minViews, maxViews, minSubs, maxSubs, keywords, sort]);
+	}, [
+		rawResults,
+		minViews,
+		maxViews,
+		minSubs,
+		maxSubs,
+		keywords,
+		channelSizeFilter,
+		sort,
+		matchSort,
+		matchScores,
+	]);
 
 	const highlightedIds = useMemo(() => {
 		const set = new Set();
 		results.forEach((v) => {
-			if (getMatchScore(v, query, keywords) >= 0.5) set.add(v.id);
+			if ((matchScores[v.id] ?? 0) >= 0.5) set.add(v.id);
 		});
 		return set;
-	}, [results, query, keywords]);
+	}, [results, matchScores]);
 
 	const extractVideoId = (input) => {
 		input = input.trim();
@@ -958,6 +1258,7 @@ export default function App() {
 			results.map((v) => makeLines(v).plain),
 			setAllCopied
 		);
+
 	const tabStyle = (tab) => ({
 		padding: '7px 16px',
 		fontSize: 11,
@@ -1035,7 +1336,6 @@ export default function App() {
 				</div>
 				<button
 					onClick={() => setDarkMode((d) => !d)}
-					title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
 					style={{
 						background: darkMode ? '#1e1e35' : '#e0e4f5',
 						border: `1px solid ${T.border3}`,
@@ -1338,7 +1638,6 @@ export default function App() {
 								flexWrap: 'wrap',
 							}}
 						>
-							{/* Region */}
 							<div>
 								<label
 									style={{
@@ -1495,6 +1794,26 @@ export default function App() {
 						</p>
 					</div>
 
+					{/* ── Channel size filter — shown after search ── */}
+					{searched && rawResults.length > 0 && (
+						<div
+							style={{
+								background: T.surface,
+								border: `1px solid ${T.border}`,
+								borderRadius: 12,
+								padding: '14px 18px',
+								marginBottom: 14,
+							}}
+						>
+							<ChannelSizeFilter
+								value={channelSizeFilter}
+								onChange={setChannelSizeFilter}
+								T={T}
+								counts={channelSizeCounts}
+							/>
+						</div>
+					)}
+
 					{error && (
 						<div
 							style={{
@@ -1570,7 +1889,10 @@ export default function App() {
 										label='Views'
 										field='views'
 										sortState={sort}
-										onSort={handleSort}
+										onSort={(f) => {
+											setMatchSort(null);
+											handleSort(f);
+										}}
 										T={T}
 										isDark={darkMode}
 									/>
@@ -1578,9 +1900,20 @@ export default function App() {
 										label='Subscribers'
 										field='subs'
 										sortState={sort}
-										onSort={handleSort}
+										onSort={(f) => {
+											setMatchSort(null);
+											handleSort(f);
+										}}
 										T={T}
 										isDark={darkMode}
+									/>
+									<MatchSortControl
+										value={matchSort}
+										onChange={(v) => {
+											setMatchSort(v);
+											if (v) setSort({ field: null, dir: null });
+										}}
+										T={T}
 									/>
 								</div>
 								{results.length > 0 && (
@@ -1671,6 +2004,7 @@ export default function App() {
 										v={v}
 										idx={i}
 										isHighlighted={highlightedIds.has(v.id)}
+										matchScore={matchScores[v.id] ?? 0}
 										T={T}
 									/>
 								))
