@@ -29,6 +29,40 @@ const fmt = (n) => {
 const fmtK = fmt;
 const getTodayKey = () => new Date().toISOString().slice(0, 10);
 
+// ─── Faceless heuristic ───────────────────────────────────────────────────────
+// Channels are considered "faceless" if their name looks like a brand/concept rather than a person's name.
+// We check: no typical first+last name pattern, common faceless keywords in channel name.
+const PERSON_NAME_PATTERN = /^[A-Z][a-z]+ [A-Z][a-z]+$/;
+const FACELESS_KEYWORDS = ['facts','tips','hub','world','stories','zone','box','daily','news','info','official','media','network','studio','channel','entertainment','clips','reviews','shorts','viral','top','best','how','guide','learn','hack','knowledge','insider','central'];
+
+const isFacelessChannel = (channelTitle) => {
+	if (!channelTitle) return false;
+	const t = channelTitle.trim();
+	// If it matches "Firstname Lastname" pattern → likely a face channel
+	if (PERSON_NAME_PATTERN.test(t)) return false;
+	// If title contains common faceless keywords → faceless
+	const lower = t.toLowerCase();
+	if (FACELESS_KEYWORDS.some(kw => lower.includes(kw))) return true;
+	// No spaces (single word brand names) → faceless
+	if (!t.includes(' ')) return true;
+	// More than 3 words likely a brand
+	if (t.split(' ').length >= 3) return true;
+	return false;
+};
+
+// ─── Short video heuristic ────────────────────────────────────────────────────
+// Shorts are typically under 60 seconds. We check duration if available, else use title/tag heuristics.
+const isShortVideo = (v) => {
+	// Duration-based (if we have it)
+	if (v.duration != null) {
+		return v.duration <= 60;
+	}
+	// Fallback: check title/tags for #shorts
+	const hay = (v.title + ' ' + (v.tags || []).join(' ')).toLowerCase();
+	return hay.includes('#shorts') || hay.includes('#short') || hay.includes('#ytshorts');
+};
+
+// ─── Storage helpers ──────────────────────────────────────────────────────────
 const loadQuotaFromStorage = async () => {
 	try {
 		const r = await window.storage.get(QUOTA_KEY);
@@ -82,13 +116,13 @@ const makeLines = (v) => {
 };
 
 const exportToCSV = (results) => {
-	const headers = ['Title (linked)', 'URL', 'Channel', 'Channel URL', 'Subscribers', 'Views', 'Source Keyword'];
+	const headers = ['Title (linked)', 'URL', 'Channel', 'Channel URL', 'Subscribers', 'Views', 'Source Keyword', 'Faceless', 'Short'];
 	const rows = results.map((v) => {
 		const url = `https://www.youtube.com/watch?v=${v.id}`;
 		const chUrl = `https://www.youtube.com/channel/${v.channelId}`;
 		const esc = (s) => `"${String(s||'').replace(/"/g,'""')}"`;
 		const hl = `"=HYPERLINK(""${url}"",""${String(v.title).replace(/"/g,"'")}"")"`;
-		return [hl, esc(url), esc(v.channelTitle), esc(chUrl), esc(fmtK(v.subscriberCount)), esc(fmtK(v.viewCount)), esc(v.sourceKeyword||'')].join(',');
+		return [hl, esc(url), esc(v.channelTitle), esc(chUrl), esc(fmtK(v.subscriberCount)), esc(fmtK(v.viewCount)), esc(v.sourceKeyword||''), esc(v.isFaceless?'Yes':'No'), esc(v.isShort?'Yes':'No')].join(',');
 	});
 	const blob = new Blob(['\uFEFF' + [headers.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' });
 	const a = document.createElement('a');
@@ -103,15 +137,62 @@ const getMatchScore = (v, q, kw) => {
 	return all.filter(k=>hay.includes(k)).length / all.length;
 };
 
+// ─── Keyword highlighting in title ───────────────────────────────────────────
+function HighlightedTitle({ title, query, keywords, T, isDark }) {
+	const allKws = useMemo(() => {
+		const parts = [...query.split(/\s+/), ...keywords.split(',')]
+			.map(k => k.trim().toLowerCase())
+			.filter(Boolean);
+		return [...new Set(parts)];
+	}, [query, keywords]);
+
+	if (!allKws.length) {
+		return <span style={{ color: T.textRow, fontWeight: 700, fontSize: 13 }}>{title}</span>;
+	}
+
+	// Build regex to match any keyword
+	const escaped = allKws.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+	const regex = new RegExp(`(${escaped.join('|')})`, 'gi');
+	const parts = title.split(regex);
+
+	return (
+		<span style={{ fontWeight: 700, fontSize: 13 }}>
+			{parts.map((part, i) => {
+				const isMatch = allKws.some(k => part.toLowerCase() === k.toLowerCase());
+				if (isMatch) {
+					return (
+						<mark key={i} style={{
+							background: isDark ? 'rgba(251,191,36,0.22)' : 'rgba(217,119,6,0.15)',
+							color: isDark ? '#fbbf24' : '#b45309',
+							fontWeight: 800,
+							borderRadius: 3,
+							padding: '0 2px',
+							border: isDark ? '1px solid rgba(251,191,36,0.4)' : '1px solid rgba(217,119,6,0.3)',
+							fontSize: 13,
+							fontFamily: "inherit",
+						}}>{part}</mark>
+					);
+				}
+				return <span key={i} style={{ color: T.textRow }}>{part}</span>;
+			})}
+		</span>
+	);
+}
+
 const CHANNEL_SIZE_OPTIONS = [
 	{ key:'small',  label:'Small',  icon:'🌱', min:0,      max:10_000,
-	  bgD:'#0c2a1a', txtD:'#34d399', brdD:'#165534', bgL:'#ecfdf5', txtL:'#065f46', brdL:'#a7f3d0' },
+		bgD:'#0c2a1a', txtD:'#34d399', brdD:'#165534', bgL:'#ecfdf5', txtL:'#065f46', brdL:'#a7f3d0' },
 	{ key:'medium', label:'Medium', icon:'📈', min:10_000, max:50_000,
-	  bgD:'#1a1507', txtD:'#f59e0b', brdD:'#55440a', bgL:'#fffbeb', txtL:'#92400e', brdL:'#fde68a' },
+		bgD:'#1a1507', txtD:'#f59e0b', brdD:'#55440a', bgL:'#fffbeb', txtL:'#92400e', brdL:'#fde68a' },
 	{ key:'big',    label:'Big',    icon:'🏆', min:50_000, max:Infinity,
-	  bgD:'#1a0a2e', txtD:'#a78bfa', brdD:'#4c1d95', bgL:'#f5f3ff', txtL:'#5b21b6', brdL:'#ddd6fe' },
+		bgD:'#1a0a2e', txtD:'#a78bfa', brdD:'#4c1d95', bgL:'#f5f3ff', txtL:'#5b21b6', brdL:'#ddd6fe' },
 ];
-const getSizeKey = (s) => { if (s<0) return null; if (s<10000) return 'small'; if (s<50000) return 'medium'; return 'big'; };
+const getSizeKey = (s) => {
+	if (s < 0) return null;
+	if (s < 50000) return 'small';
+	if (s < 100000) return 'medium';
+	return 'big';
+};
 
 const DARK = {
 	bg:'#07070f', surface:'#0d0d1a', surface2:'#0b0b16', surface4:'#111127',
@@ -132,6 +213,8 @@ const DARK = {
 	errBg:'#1a0505', errBorder:'#7f1d1d', errTxt:'#fca5a5',
 	lViews:'#60a5fa', lSubs:'#a78bfa', lKw:'#34d399', lSearch:'#6366f1',
 	copiedRowBg:'rgba(22,163,74,0.07)', chCopyBg:'#0d1a2a', chCopyBrd:'#1e3a5f', chCopyTxt:'#60a5fa',
+	facelessBg:'#0f1a2e', facelessBrd:'#1e3a5f', facelessTxt:'#60a5fa',
+	shortBg:'#2a0f1a', shortBrd:'#5f1e3a', shortTxt:'#f472b6',
 };
 const LIGHT = {
 	bg:'#f0f2fa', surface:'#ffffff', surface2:'#f8f9fe', surface4:'#e8eaf6',
@@ -152,7 +235,138 @@ const LIGHT = {
 	errBg:'#fff1f2', errBorder:'#fecdd3', errTxt:'#be123c',
 	lViews:'#2563eb', lSubs:'#7c3aed', lKw:'#059669', lSearch:'#4f46e5',
 	copiedRowBg:'rgba(5,150,105,0.06)', chCopyBg:'#eff6ff', chCopyBrd:'#bfdbfe', chCopyTxt:'#1d4ed8',
+	facelessBg:'#eff6ff', facelessBrd:'#bfdbfe', facelessTxt:'#1d4ed8',
+	shortBg:'#fdf2f8', shortBrd:'#fbcfe8', shortTxt:'#be185d',
 };
+
+// ─── Content Type Filter ──────────────────────────────────────────────────────
+// facelessFilter: 'all' | 'faceless' | 'not-faceless'
+// shortFilter:    'all' | 'short'    | 'not-short'
+
+function ContentTypeFilter({ facelessFilter, shortFilter, onFaceless, onShort, T, isDark, counts }) {
+	const facelessOpts = [
+		{ val: 'all',          label: '🌐 All',          desc: null },
+		{ val: 'faceless',     label: '🎭 Faceless Only', desc: 'Brand/concept channels' },
+		{ val: 'not-faceless', label: '🙋 Face Channels', desc: 'Person/creator channels' },
+	];
+	const shortOpts = [
+		{ val: 'all',      label: '🌐 All',          desc: null },
+		{ val: 'not-short',label: '🎬 Long Videos',   desc: 'Regular videos only' },
+		{ val: 'short',    label: '⚡ Shorts Only',   desc: '#shorts / ≤60s' },
+	];
+
+	const btnSt = (active, color, bg, brd) => ({
+		background: active ? bg : 'transparent',
+		color: active ? color : T.textDim,
+		border: `1.5px solid ${active ? brd : T.border3}`,
+		borderRadius: 20, padding: '5px 14px', fontSize: 11, cursor: 'pointer',
+		fontFamily: 'inherit', fontWeight: active ? 700 : 400, transition: 'all .15s',
+		boxShadow: active ? `0 0 8px ${brd}66` : 'none', whiteSpace: 'nowrap',
+	});
+
+	return (
+		<div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+			{/* Faceless Filter */}
+			<div>
+				<label style={{ color: T.accent3, fontSize: 10, fontWeight: 700, display: 'block', marginBottom: 7, letterSpacing: 1 }}>
+					🎭 CHANNEL TYPE
+					<span style={{ color: T.textMid, fontWeight: 400, marginLeft: 6 }}>(faceless detection)</span>
+				</label>
+				<div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+					{facelessOpts.map(o => {
+						const active = facelessFilter === o.val;
+						return (
+							<button key={o.val} onClick={() => onFaceless(o.val)}
+								style={btnSt(active,
+									isDark ? '#60a5fa' : '#1d4ed8',
+									isDark ? '#0f1a2e' : '#eff6ff',
+									isDark ? '#1e3a5f' : '#bfdbfe'
+								)}>
+								{o.label}
+								{o.val !== 'all' && (
+									<span style={{
+										marginLeft: 5,
+										background: active ? (isDark ? '#1e3a5f' : '#bfdbfe') : T.border3,
+										color: active ? (isDark ? '#60a5fa' : '#1d4ed8') : T.textDim,
+										borderRadius: 10, padding: '0 6px', fontSize: 9,
+										fontFamily: "'JetBrains Mono',monospace", fontWeight: 700,
+									}}>
+										{o.val === 'faceless' ? (counts.faceless || 0) : (counts.notFaceless || 0)}
+									</span>
+								)}
+							</button>
+						);
+					})}
+				</div>
+				<div style={{ marginTop: 5, color: T.textMid, fontSize: 9 }}>
+					💡 Heuristic based on channel name pattern · Brand/concept names = Faceless · Person names = Face channel
+				</div>
+			</div>
+
+			{/* Short Filter */}
+			<div>
+				<label style={{ color: T.shortTxt || '#f472b6', fontSize: 10, fontWeight: 700, display: 'block', marginBottom: 7, letterSpacing: 1 }}>
+					⚡ VIDEO LENGTH
+					<span style={{ color: T.textMid, fontWeight: 400, marginLeft: 6 }}>(shorts detection)</span>
+				</label>
+				<div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+					{shortOpts.map(o => {
+						const active = shortFilter === o.val;
+						const pinkTxt = isDark ? '#f472b6' : '#be185d';
+						const pinkBg  = isDark ? '#2a0f1a' : '#fdf2f8';
+						const pinkBrd = isDark ? '#5f1e3a' : '#fbcfe8';
+						return (
+							<button key={o.val} onClick={() => onShort(o.val)}
+								style={btnSt(active, pinkTxt, pinkBg, pinkBrd)}>
+								{o.label}
+								{o.val !== 'all' && (
+									<span style={{
+										marginLeft: 5,
+										background: active ? pinkBrd : T.border3,
+										color: active ? pinkBg : T.textDim,
+										borderRadius: 10, padding: '0 6px', fontSize: 9,
+										fontFamily: "'JetBrains Mono',monospace", fontWeight: 700,
+									}}>
+										{o.val === 'short' ? (counts.short || 0) : (counts.notShort || 0)}
+									</span>
+								)}
+							</button>
+						);
+					})}
+				</div>
+				<div style={{ marginTop: 5, color: T.textMid, fontSize: 9 }}>
+					💡 Detected via #shorts tag in title/tags · Default shows Long Videos only
+				</div>
+			</div>
+		</div>
+	);
+}
+
+// ─── Channel Type Badges ──────────────────────────────────────────────────────
+function ContentTypeBadges({ v, isDark, T }) {
+	return (
+		<>
+			{v.isFaceless && (
+				<span style={{
+					background: isDark ? '#0f1a2e' : '#eff6ff',
+					color: isDark ? '#60a5fa' : '#1d4ed8',
+					border: `1px solid ${isDark ? '#1e3a5f' : '#bfdbfe'}`,
+					fontSize: 9, padding: '1px 6px', borderRadius: 4, fontWeight: 700,
+					fontFamily: "'JetBrains Mono',monospace", whiteSpace: 'nowrap', flexShrink: 0,
+				}}>🎭 Faceless</span>
+			)}
+			{v.isShort && (
+				<span style={{
+					background: isDark ? '#2a0f1a' : '#fdf2f8',
+					color: isDark ? '#f472b6' : '#be185d',
+					border: `1px solid ${isDark ? '#5f1e3a' : '#fbcfe8'}`,
+					fontSize: 9, padding: '1px 6px', borderRadius: 4, fontWeight: 700,
+					fontFamily: "'JetBrains Mono',monospace", whiteSpace: 'nowrap', flexShrink: 0,
+				}}>⚡ Short</span>
+			)}
+		</>
+	);
+}
 
 function QuotaCircle({ used, total, T }) {
 	const pct = Math.min(used/total,1), remaining = Math.max(total-used,0);
@@ -263,7 +477,7 @@ function SizeBadge({ subs, isDark }) {
 	return <span style={{ background:isDark?o.bgD:o.bgL, color:isDark?o.txtD:o.txtL, border:`1px solid ${isDark?o.brdD:o.brdL}`, fontSize:9, padding:'1px 6px', borderRadius:4, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", whiteSpace:'nowrap', flexShrink:0 }}>{o.icon} {o.label}</span>;
 }
 
-function VideoRow({ v, idx, isHighlighted, matchScore, T, isDark, copiedIds, onCopy }) {
+function VideoRow({ v, idx, isHighlighted, matchScore, T, isDark, copiedIds, onCopy, query, keywords }) {
 	const url = `https://www.youtube.com/watch?v=${v.id}`;
 	const isCopied = copiedIds.has(v.id);
 	const baseBg = isCopied ? T.copiedRowBg : (idx%2===0?T.rowEven:T.rowOdd);
@@ -280,7 +494,17 @@ function VideoRow({ v, idx, isHighlighted, matchScore, T, isDark, copiedIds, onC
 					{isHighlighted && <span style={{ background:T.pillHL, color:T.pillHLText, fontSize:9, padding:'1px 6px', borderRadius:4, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", whiteSpace:'nowrap', flexShrink:0 }}>✦ MATCH</span>}
 					{isCopied && <span style={{ background:'#16a34a1a', color:'#16a34a', border:'1px solid #16a34a55', fontSize:9, padding:'1px 6px', borderRadius:4, fontWeight:700, fontFamily:"'JetBrains Mono',monospace", whiteSpace:'nowrap', flexShrink:0 }}>✓ COPIED</span>}
 					<MatchScoreBadge score={matchScore} />
-					<a href={url} target='_blank' rel='noreferrer' style={{ color:T.textRow, fontWeight:600, fontSize:13, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', textDecoration:'none', display:'block' }} title={v.title} onMouseEnter={e=>e.currentTarget.style.color=T.accent2} onMouseLeave={e=>e.currentTarget.style.color=T.textRow}>{v.title}</a>
+					<ContentTypeBadges v={v} isDark={isDark} T={T} />
+					{/* Highlighted Title */}
+					<a
+						href={url}
+						target='_blank'
+						rel='noreferrer'
+						style={{ color: 'inherit', textDecoration:'none', display:'block', minWidth:0, overflow:'hidden' }}
+						title={v.title}
+					>
+						<HighlightedTitle title={v.title} query={query} keywords={keywords} T={T} isDark={isDark} />
+					</a>
 				</div>
 				<div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
 					<div style={{ color:T.accent, fontSize:11, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>📺 {v.channelTitle}</div>
@@ -305,7 +529,6 @@ function VideoRow({ v, idx, isHighlighted, matchScore, T, isDark, copiedIds, onC
 	);
 }
 
-// Multi-select channel size filter
 function ChannelSizeFilter({ selected, onToggle, T, isDark, counts }) {
 	const allSelected = selected.size === 0;
 	return (
@@ -344,7 +567,7 @@ function ChannelSizeFilter({ selected, onToggle, T, isDark, counts }) {
 					);
 				})}
 			</div>
-			<div style={{ marginTop:6, color:T.textMid, fontSize:9 }}>🌱 Small: 0–10K · 📈 Medium: 10K–50K · 🏆 Big: 50K+ · একাধিক size একসাথে select করা যাবে</div>
+			<div style={{ marginTop:6, color:T.textMid, fontSize:9 }}>🌱 Small: 0–50K · 📈 Medium: 50K–100K · 🏆 Big: 100K+ · একাধিক size একসাথে select করা যাবে</div>
 		</div>
 	);
 }
@@ -363,7 +586,7 @@ function MatchSortControl({ value, onChange, T, isDark }) {
 }
 
 export default function App() {
-	const [darkMode, setDarkMode] = useState(false); // default: light
+	const [darkMode, setDarkMode] = useState(false);
 	const T = darkMode ? DARK : LIGHT;
 	const isDark = darkMode;
 
@@ -376,12 +599,15 @@ export default function App() {
 	const [bulkKeywords, setBulkKeywords] = useState('');
 	const [activeTab, setActiveTab] = useState('keyword');
 	const [region, setRegion] = useState('US');
-	const [minViews, setMinViews] = useState('2000');   // default 2k
+	const [minViews, setMinViews] = useState('2000');
 	const [maxViews, setMaxViews] = useState('');
-	const [minSubs, setMinSubs] = useState('1000');     // default 1k
+	const [minSubs, setMinSubs] = useState('1000');
 	const [maxSubs, setMaxSubs] = useState('');
 	const [keywords, setKeywords] = useState('');
-	const [channelSizeSelected, setChannelSizeSelected] = useState(new Set()); // empty = all
+	const [channelSizeSelected, setChannelSizeSelected] = useState(new Set());
+	// NEW: content type filters — default: faceless only + not short
+	const [facelessFilter, setFacelessFilter] = useState('faceless');
+	const [shortFilter, setShortFilter] = useState('not-short');
 	const [rawResults, setRawResults] = useState([]);
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState('');
@@ -423,6 +649,16 @@ export default function App() {
 		return m;
 	},[rawResults,query,keywords]);
 
+	// Content type counts from rawResults (before other filters)
+	const contentTypeCounts = useMemo(() => {
+		const c = { faceless: 0, notFaceless: 0, short: 0, notShort: 0 };
+		rawResults.forEach(v => {
+			if (v.isFaceless) c.faceless++; else c.notFaceless++;
+			if (v.isShort) c.short++; else c.notShort++;
+		});
+		return c;
+	}, [rawResults]);
+
 	const sizeCounts = useMemo(()=>{
 		const c={total:0,small:0,medium:0,big:0};
 		rawResults.forEach(v=>{const k=getSizeKey(v.subscriberCount);if(k)c[k]++;c.total++;});
@@ -438,12 +674,18 @@ export default function App() {
 			if (maxSubs!==''&&v.subscriberCount>parseInt(maxSubs)) return false;
 			if (kwList.length>0){const hay=(v.title+' '+v.tags.join(' ')).toLowerCase();if(!kwList.some(k=>hay.includes(k)))return false;}
 			if (channelSizeSelected.size>0){const sk=getSizeKey(v.subscriberCount);if(!sk||!channelSizeSelected.has(sk))return false;}
+			// Faceless filter
+			if (facelessFilter === 'faceless' && !v.isFaceless) return false;
+			if (facelessFilter === 'not-faceless' && v.isFaceless) return false;
+			// Short filter
+			if (shortFilter === 'short' && !v.isShort) return false;
+			if (shortFilter === 'not-short' && v.isShort) return false;
 			return true;
 		});
 		if (matchSort) arr=[...arr].sort((a,b)=>matchSort==='desc'?(matchScores[b.id]??0)-(matchScores[a.id]??0):(matchScores[a.id]??0)-(matchScores[b.id]??0));
 		else if (sort.field){const k=sort.field==='views'?'viewCount':'subscriberCount';arr=[...arr].sort((a,b)=>sort.dir==='desc'?b[k]-a[k]:a[k]-b[k]);}
 		return arr;
-	},[rawResults,minViews,maxViews,minSubs,maxSubs,keywords,channelSizeSelected,sort,matchSort,matchScores]);
+	},[rawResults,minViews,maxViews,minSubs,maxSubs,keywords,channelSizeSelected,facelessFilter,shortFilter,sort,matchSort,matchScores]);
 
 	const highlightedIds = useMemo(()=>{const s=new Set();results.forEach(v=>{if((matchScores[v.id]??0)>=0.5)s.add(v.id);});return s;},[results,matchScores]);
 
@@ -454,6 +696,13 @@ export default function App() {
 		if(/^[\w-]{11}$/.test(input))return input;
 		return null;
 	};
+
+	// Enrich items with isFaceless, isShort
+	const enrichItems = (items) => items.map(v => ({
+		...v,
+		isFaceless: isFacelessChannel(v.channelTitle),
+		isShort: isShortVideo(v),
+	}));
 
 	const fetchChannelSubs = async (items, qRef) => {
 		const cids=[...new Set(items.map(i=>i.snippet.channelId))];
@@ -477,17 +726,27 @@ export default function App() {
 			const all=[],q={cost:0};
 			for(let i=0;i<ids.length;i+=50){
 				const batch=ids.slice(i,i+50);
-				const dr=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${batch.join(',')}&key=${API_KEY}`);
+				const dr=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet,contentDetails&id=${batch.join(',')}&key=${API_KEY}`);
 				const dd=await dr.json();if(dd.error)throw new Error(dd.error.message);
 				q.cost+=QUOTA_COSTS.videos;
 				const sub=await fetchChannelSubs(dd.items||[],q);
-				(dd.items||[]).forEach(x=>all.push({id:x.id,title:x.snippet.title,channelTitle:x.snippet.channelTitle,channelId:x.snippet.channelId,viewCount:parseInt(x.statistics?.viewCount??-1),subscriberCount:sub[x.snippet.channelId]??-1,tags:x.snippet.tags??[]}));
+				(dd.items||[]).forEach(x=>{
+					const dur = parseDuration(x.contentDetails?.duration);
+					all.push({id:x.id,title:x.snippet.title,channelTitle:x.snippet.channelTitle,channelId:x.snippet.channelId,viewCount:parseInt(x.statistics?.viewCount??-1),subscriberCount:sub[x.snippet.channelId]??-1,tags:x.snippet.tags??[],duration:dur});
+				});
 				setBulkProgress({current:Math.min(i+50,ids.length),total:ids.length});
 			}
-			addQuota(q.cost);setRawResults(all);setSearched(true);
+			addQuota(q.cost);setRawResults(enrichItems(all));setSearched(true);
 		}catch(e){setError('❌ '+e.message);}
 		finally{setLoading(false);setBulkProgress({current:0,total:0});}
 	},[bulkUrls]);
+
+	const parseDuration = (iso) => {
+		if (!iso) return null;
+		const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+		if (!m) return null;
+		return (parseInt(m[1]||0)*3600) + (parseInt(m[2]||0)*60) + parseInt(m[3]||0);
+	};
 
 	const doBulkKeywordSearch = useCallback(async()=>{
 		const kws=bulkKeywords.split('\n').map(l=>l.trim()).filter(Boolean);
@@ -503,16 +762,20 @@ export default function App() {
 					q.cost+=QUOTA_COSTS.search;
 					const ids=(sd.items||[]).map(i=>i.id.videoId).filter(id=>!seen.has(id));
 					if(ids.length){
-						const dr=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${ids.join(',')}&key=${API_KEY}`);
+						const dr=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet,contentDetails&id=${ids.join(',')}&key=${API_KEY}`);
 						const dd=await dr.json();if(dd.error)throw new Error(dd.error.message);
 						q.cost+=QUOTA_COSTS.videos;
 						const sub=await fetchChannelSubs(dd.items||[],q);
-						(dd.items||[]).forEach(x=>{if(!seen.has(x.id)){seen.add(x.id);all.push({id:x.id,title:x.snippet.title,channelTitle:x.snippet.channelTitle,channelId:x.snippet.channelId,viewCount:parseInt(x.statistics?.viewCount??-1),subscriberCount:sub[x.snippet.channelId]??-1,tags:x.snippet.tags??[],sourceKeyword:kw});}});
+						(dd.items||[]).forEach(x=>{if(!seen.has(x.id)){
+							seen.add(x.id);
+							const dur = parseDuration(x.contentDetails?.duration);
+							all.push({id:x.id,title:x.snippet.title,channelTitle:x.snippet.channelTitle,channelId:x.snippet.channelId,viewCount:parseInt(x.statistics?.viewCount??-1),subscriberCount:sub[x.snippet.channelId]??-1,tags:x.snippet.tags??[],sourceKeyword:kw,duration:dur});
+						}});
 					}
 				}catch{}
 				setBulkProgress({current:ki+1,total:kws.length});
 			}
-			addQuota(q.cost);setRawResults(all);setSearched(true);
+			addQuota(q.cost);setRawResults(enrichItems(all));setSearched(true);
 		}catch(e){setError('❌ '+e.message);}
 		finally{setLoading(false);setBulkProgress({current:0,total:0});}
 	},[bulkKeywords,region]);
@@ -525,7 +788,7 @@ export default function App() {
 			let raw=[],nextTk='',q={cost:0};
 			if(hU){
 				const vid=extractVideoId(videoUrl);if(!vid)throw new Error('Invalid YouTube URL or video ID.');
-				const r=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${vid}&key=${API_KEY}`);
+				const r=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet,contentDetails&id=${vid}&key=${API_KEY}`);
 				const d=await r.json();if(d.error)throw new Error(d.error.message);
 				raw=d.items||[];q.cost+=QUOTA_COSTS.videos;
 			}else{
@@ -533,13 +796,16 @@ export default function App() {
 				if(pageToken)url+=`&pageToken=${pageToken}`;
 				const sr=await fetch(url);const sd=await sr.json();if(sd.error)throw new Error(sd.error.message);
 				nextTk=sd.nextPageToken??'';
-				const dr=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${sd.items.map(i=>i.id.videoId).join(',')}&key=${API_KEY}`);
+				const dr=await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet,contentDetails&id=${sd.items.map(i=>i.id.videoId).join(',')}&key=${API_KEY}`);
 				const dd=await dr.json();if(dd.error)throw new Error(dd.error.message);
 				raw=dd.items||[];q.cost+=QUOTA_COSTS.search+QUOTA_COSTS.videos;
 			}
 			const sub=await fetchChannelSubs(raw,q);addQuota(q.cost);
-			const vids=raw.map(x=>({id:x.id,title:x.snippet.title,channelTitle:x.snippet.channelTitle,channelId:x.snippet.channelId,viewCount:parseInt(x.statistics?.viewCount??-1),subscriberCount:sub[x.snippet.channelId]??-1,tags:x.snippet.tags??[]}));
-			setRawResults(prev=>pageToken?[...prev,...vids]:vids);
+			const vids=raw.map(x=>{
+				const dur = parseDuration(x.contentDetails?.duration);
+				return {id:x.id,title:x.snippet.title,channelTitle:x.snippet.channelTitle,channelId:x.snippet.channelId,viewCount:parseInt(x.statistics?.viewCount??-1),subscriberCount:sub[x.snippet.channelId]??-1,tags:x.snippet.tags??[],duration:dur};
+			});
+			setRawResults(prev=>pageToken?[...prev,...enrichItems(vids)]:enrichItems(vids));
 			setNextPageToken(nextTk);setSearched(true);
 		}catch(e){setError('❌ '+e.message);}
 		finally{setLoading(false);}
@@ -556,6 +822,11 @@ export default function App() {
 	const hlCount = results.filter(v=>highlightedIds.has(v.id)).length;
 	const copiedCount = results.filter(v=>copiedIds.has(v.id)).length;
 
+	// Active filter pills for display
+	const activeFilterPills = [];
+	if (facelessFilter !== 'all') activeFilterPills.push(facelessFilter === 'faceless' ? '🎭 Faceless Only' : '🙋 Face Channels');
+	if (shortFilter !== 'all') activeFilterPills.push(shortFilter === 'not-short' ? '🎬 Long Videos Only' : '⚡ Shorts Only');
+
 	return (
 		<div style={{ minHeight:'100vh', background:T.bg, color:T.text, fontFamily:"'Syne',sans-serif", transition:'background .3s,color .3s' }}>
 			<link href='https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap' rel='stylesheet' />
@@ -569,9 +840,15 @@ export default function App() {
 						<p style={{ margin:0, color:T.accent, fontSize:11 }}>Search and filter YouTube videos with advanced criteria. Powered by Makin</p>
 					</div>
 				</div>
-				<button onClick={()=>setDarkMode(d=>!d)} style={{ background:isDark?'#1e1e35':'#e0e4f5', border:`1px solid ${T.border3}`, borderRadius:50, width:52, height:28, cursor:'pointer', position:'relative', transition:'background .3s', flexShrink:0 }}>
-					<div style={{ position:'absolute', top:3, left:isDark?26:3, width:20, height:20, borderRadius:'50%', background:isDark?'#6366f1':'#fbbf24', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, transition:'left .3s,background .3s', boxShadow:'0 1px 4px rgba(0,0,0,.3)' }}>{isDark?'🌙':'☀️'}</div>
-				</button>
+				<div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+					{/* Active filter pills in header */}
+					{activeFilterPills.map(p => (
+						<span key={p} style={{ background: isDark ? '#1e1e35' : '#e0e7ff', color: T.accent2, border: `1px solid ${T.border3}`, borderRadius: 12, padding: '3px 10px', fontSize: 10, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", whiteSpace: 'nowrap' }}>{p}</span>
+					))}
+					<button onClick={()=>setDarkMode(d=>!d)} style={{ background:isDark?'#1e1e35':'#e0e4f5', border:`1px solid ${T.border3}`, borderRadius:50, width:52, height:28, cursor:'pointer', position:'relative', transition:'background .3s', flexShrink:0 }}>
+						<div style={{ position:'absolute', top:3, left:isDark?26:3, width:20, height:20, borderRadius:'50%', background:isDark?'#6366f1':'#fbbf24', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, transition:'left .3s,background .3s', boxShadow:'0 1px 4px rgba(0,0,0,.3)' }}>{isDark?'🌙':'☀️'}</div>
+					</button>
+				</div>
 			</div>
 
 			<div style={{ display:'flex', maxWidth:1300, margin:'0 auto' }}>
@@ -637,10 +914,35 @@ export default function App() {
 						<p style={{ color:T.textMid, fontSize:10, margin:'10px 0 0' }}>💡 Default: Min Views 2,000 · Min Subs 1,000 · সব filter optional</p>
 					</div>
 
-					{/* Channel Size Filter */}
-					{searched&&rawResults.length>0&&(
-						<div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:'14px 18px', marginBottom:14 }}>
-							<ChannelSizeFilter selected={channelSizeSelected} onToggle={handleSizeToggle} T={T} isDark={isDark} counts={sizeCounts}/>
+					{/* Content Type + Channel Size Filters (shown after search) */}
+					{searched && rawResults.length > 0 && (
+						<div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:'16px 18px', marginBottom:14, display:'flex', flexDirection:'column', gap:16 }}>
+							{/* Content Type Filter (always visible) */}
+							<ContentTypeFilter
+								facelessFilter={facelessFilter}
+								shortFilter={shortFilter}
+								onFaceless={setFacelessFilter}
+								onShort={setShortFilter}
+								T={T} isDark={isDark}
+								counts={contentTypeCounts}
+							/>
+							<div style={{ borderTop: `1px solid ${T.border2}`, paddingTop: 14 }}>
+								<ChannelSizeFilter selected={channelSizeSelected} onToggle={handleSizeToggle} T={T} isDark={isDark} counts={sizeCounts}/>
+							</div>
+						</div>
+					)}
+
+					{/* Content type filter also accessible before search */}
+					{!searched && (
+						<div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:'16px 18px', marginBottom:14 }}>
+							<ContentTypeFilter
+								facelessFilter={facelessFilter}
+								shortFilter={shortFilter}
+								onFaceless={setFacelessFilter}
+								onShort={setShortFilter}
+								T={T} isDark={isDark}
+								counts={{ faceless:0, notFaceless:0, short:0, notShort:0 }}
+							/>
 						</div>
 					)}
 
@@ -675,7 +977,7 @@ export default function App() {
 							</div>
 							{results.length===0
 								? <div style={{ textAlign:'center', color:T.textDim, padding:40, fontSize:13 }}>No results match your filters.</div>
-								: results.map((v,i)=><VideoRow key={v.id} v={v} idx={i} isHighlighted={highlightedIds.has(v.id)} matchScore={matchScores[v.id]??0} T={T} isDark={isDark} copiedIds={copiedIds} onCopy={handleCopyId}/>)
+								: results.map((v,i)=><VideoRow key={v.id} v={v} idx={i} isHighlighted={highlightedIds.has(v.id)} matchScore={matchScores[v.id]??0} T={T} isDark={isDark} copiedIds={copiedIds} onCopy={handleCopyId} query={query} keywords={keywords}/>)
 							}
 							{nextPageToken&&!loading&&activeTab!=='bulk'&&(
 								<div style={{ textAlign:'center', padding:16, borderTop:`1px solid ${T.border2}` }}>
