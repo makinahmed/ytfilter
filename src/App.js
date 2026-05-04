@@ -2,47 +2,67 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 
 const API_KEY = 'AIzaSyCR7aNXAArVk2fS9mr3eGQRoPyQbG6wT6E';
 const DAILY_QUOTA = 10000;
+const QUOTA_KEY = 'yt_quota_v2';
 
-// YouTube API quota costs
-const QUOTA_COSTS = {
-	search: 100, // search.list
-	videos: 1, // videos.list (per call, not per video)
-	channels: 1, // channels.list (per call)
-};
+const QUOTA_COSTS = { search: 100, videos: 1, channels: 1 };
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+const REGIONS = [
+	{ code: 'US', label: '🇺🇸 USA' },
+	{ code: 'GB', label: '🇬🇧 UK' },
+	{ code: 'CA', label: '🇨🇦 Canada' },
+	{ code: 'AU', label: '🇦🇺 Australia' },
+	{ code: 'IN', label: '🇮🇳 India' },
+	{ code: 'BD', label: '🇧🇩 Bangladesh' },
+	{ code: 'PK', label: '🇵🇰 Pakistan' },
+	{ code: 'DE', label: '🇩🇪 Germany' },
+	{ code: 'FR', label: '🇫🇷 France' },
+	{ code: 'JP', label: '🇯🇵 Japan' },
+	{ code: 'KR', label: '🇰🇷 South Korea' },
+	{ code: 'BR', label: '🇧🇷 Brazil' },
+	{ code: 'MX', label: '🇲🇽 Mexico' },
+	{ code: 'NG', label: '🇳🇬 Nigeria' },
+	{ code: 'EG', label: '🇪🇬 Egypt' },
+	{ code: 'SA', label: '🇸🇦 Saudi Arabia' },
+	{ code: 'ID', label: '🇮🇩 Indonesia' },
+	{ code: 'PH', label: '🇵🇭 Philippines' },
+	{ code: 'TR', label: '🇹🇷 Turkey' },
+	{ code: 'RU', label: '🇷🇺 Russia' },
+];
+
 const fmt = (n) => {
 	if (n < 0) return 'N/A';
 	if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
 	if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-	return n.toLocaleString();
+	return String(n);
 };
-
+const fmtK = fmt;
 const getTodayKey = () => new Date().toISOString().slice(0, 10);
 
-const loadQuota = () => {
+// ── Persistent quota via window.storage ───────────────────────────────────────
+const loadQuotaFromStorage = async () => {
 	try {
-		const saved = JSON.parse(localStorage.getItem('yt_quota') || '{}');
-		if (saved.date === getTodayKey()) return saved.used || 0;
+		const result = await window.storage.get(QUOTA_KEY);
+		if (result) {
+			const saved = JSON.parse(result.value);
+			if (saved.date === getTodayKey()) return saved.used || 0;
+		}
 	} catch {}
 	return 0;
 };
 
-const saveQuota = (used) => {
+const saveQuotaToStorage = async (used) => {
 	try {
-		localStorage.setItem(
-			'yt_quota',
+		await window.storage.set(
+			QUOTA_KEY,
 			JSON.stringify({ date: getTodayKey(), used })
 		);
 	} catch {}
 };
 
-// Time until midnight (quota reset)
 const getResetSeconds = () => {
-	const now = new Date();
 	const midnight = new Date();
 	midnight.setHours(24, 0, 0, 0);
-	return Math.floor((midnight - now) / 1000);
+	return Math.floor((midnight - new Date()) / 1000);
 };
 
 const fmtCountdown = (sec) => {
@@ -52,7 +72,6 @@ const fmtCountdown = (sec) => {
 	return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 };
 
-// ── copy helpers ──────────────────────────────────────────────────────────────
 const copyRich = async (htmlLines, plainLines, setCopied) => {
 	const html = htmlLines.join('<br>');
 	const plain = plainLines.join('\n');
@@ -77,25 +96,178 @@ const copyRich = async (htmlLines, plainLines, setCopied) => {
 
 const makeLines = (v) => {
 	const url = `https://www.youtube.com/watch?v=${v.id}`;
-	const subs =
-		v.subscriberCount >= 0 ? v.subscriberCount.toLocaleString() : 'N/A';
-	const views = v.viewCount >= 0 ? v.viewCount.toLocaleString() : 'N/A';
 	return {
-		html: `<a href="${url}">${v.title}</a> - ${subs} subscribers - ${views} views`,
-		plain: `${v.title} (${url}) - ${subs} subscribers - ${views} views`,
+		html: `<a href="${url}">${v.title}</a> - ${fmtK(v.subscriberCount)} subscribers - ${fmtK(v.viewCount)} views`,
+		plain: `${v.title} (${url}) - ${fmtK(v.subscriberCount)} subscribers - ${fmtK(v.viewCount)} views`,
 	};
 };
 
-// ── Quota Circle ─────────────────────────────────────────────────────────────
-function QuotaCircle({ used, total }) {
+const exportToCSV = (results) => {
+	const headers = [
+		'Title (linked)',
+		'URL',
+		'Channel',
+		'Subscribers',
+		'Views',
+		'Source Keyword',
+	];
+	const rows = results.map((v) => {
+		const url = `https://www.youtube.com/watch?v=${v.id}`;
+		const escape = (s) => `"${String(s || '').replace(/"/g, '""')}"`;
+		const hyperlink = `"=HYPERLINK(""${url}"",""${String(v.title).replace(/"/g, "'")}"")"`;
+		return [
+			hyperlink,
+			escape(url),
+			escape(v.channelTitle),
+			escape(fmtK(v.subscriberCount)),
+			escape(fmtK(v.viewCount)),
+			escape(v.sourceKeyword || ''),
+		].join(',');
+	});
+	const blob = new Blob(['\uFEFF' + [headers.join(','), ...rows].join('\n')], {
+		type: 'text/csv;charset=utf-8;',
+	});
+	const link = document.createElement('a');
+	link.href = URL.createObjectURL(blob);
+	link.download = `yt-filter-results-${getTodayKey()}.csv`;
+	document.body.appendChild(link);
+	link.click();
+	document.body.removeChild(link);
+};
+
+const getMatchScore = (v, searchQuery, filterKeywords) => {
+	const allKws = [...searchQuery.split(/\s+/), ...filterKeywords.split(',')]
+		.map((k) => k.trim().toLowerCase())
+		.filter(Boolean);
+	if (allKws.length === 0) return 0;
+	const hay = (v.title + ' ' + (v.tags || []).join(' ')).toLowerCase();
+	return allKws.filter((k) => hay.includes(k)).length / allKws.length;
+};
+
+// ── Themes ────────────────────────────────────────────────────────────────────
+const DARK = {
+	bg: '#07070f',
+	surface: '#0d0d1a',
+	surface2: '#0b0b16',
+	surface4: '#111127',
+	border: '#1e1e35',
+	border2: '#1c1c2e',
+	border3: '#2a2a40',
+	text: '#e0e0ff',
+	textDim: '#44445a',
+	textMid: '#555575',
+	textRow: '#e4e4f0',
+	accent: '#6366f1',
+	accent2: '#a78bfa',
+	accent3: '#60a5fa',
+	accent4: '#34d399',
+	accentAmber: '#f59e0b',
+	headerBg: 'linear-gradient(135deg,#1a0533,#0f0f2e)',
+	inputBg: '#0f0f1c',
+	selectBg: '#0f0f1c',
+	rowEven: '#0b0b16',
+	rowOdd: '#0d0d1a',
+	rowHover: '#13132a',
+	rowHL: 'rgba(251,191,36,0.08)',
+	rowHLBorder: 'rgba(251,191,36,0.35)',
+	rowHLHover: 'rgba(251,191,36,0.14)',
+	pillHL: '#78350f',
+	pillHLText: '#fbbf24',
+	quotaRing: '#1e1e35',
+	quotaBg: '#0f0f1c',
+	tagBg: '#1e1b4b',
+	tagText: '#a78bfa',
+	btnSearch: 'linear-gradient(135deg,#6d28d9,#4f46e5)',
+	btnDis: '#1e1e3a',
+	btnDisTxt: '#555',
+	btnCopy: '#18181b',
+	btnCopyBorder: '#3f3f46',
+	btnCopyTxt: '#a1a1aa',
+	btnCopied: '#16a34a',
+	btnExport: '#0f2e1a',
+	btnExportTxt: '#34d399',
+	btnExportBorder: '#166534',
+	btnMore: '#111127',
+	btnMoreTxt: '#6366f1',
+	btnMoreBorder: '#2a2a4a',
+	tabActive: 'linear-gradient(135deg,#6d28d9,#4f46e5)',
+	tabActiveTxt: '#fff',
+	tabInactiveTxt: '#44445a',
+	tabBg: '#0a0a15',
+	errBg: '#1a0505',
+	errBorder: '#7f1d1d',
+	errTxt: '#fca5a5',
+	lViews: '#60a5fa',
+	lSubs: '#a78bfa',
+	lKw: '#34d399',
+	lSearch: '#6366f1',
+};
+const LIGHT = {
+	bg: '#f0f2fa',
+	surface: '#ffffff',
+	surface2: '#f8f9fe',
+	surface4: '#e8eaf6',
+	border: '#d0d4f0',
+	border2: '#dde0f5',
+	border3: '#c4c8e8',
+	text: '#1a1a3a',
+	textDim: '#7880b0',
+	textMid: '#9096c0',
+	textRow: '#1a1a3a',
+	accent: '#4f46e5',
+	accent2: '#7c3aed',
+	accent3: '#2563eb',
+	accent4: '#059669',
+	accentAmber: '#d97706',
+	headerBg: 'linear-gradient(135deg,#ede9fe,#e0e7ff)',
+	inputBg: '#f8f9fe',
+	selectBg: '#f8f9fe',
+	rowEven: '#f8f9fe',
+	rowOdd: '#ffffff',
+	rowHover: '#ede9fe',
+	rowHL: 'rgba(217,119,6,0.07)',
+	rowHLBorder: 'rgba(217,119,6,0.3)',
+	rowHLHover: 'rgba(217,119,6,0.12)',
+	pillHL: '#fef3c7',
+	pillHLText: '#92400e',
+	quotaRing: '#e0e4f5',
+	quotaBg: '#f0f2fa',
+	tagBg: '#ede9fe',
+	tagText: '#6d28d9',
+	btnSearch: 'linear-gradient(135deg,#6d28d9,#4f46e5)',
+	btnDis: '#e0e4f5',
+	btnDisTxt: '#aab0d0',
+	btnCopy: '#f0f2fa',
+	btnCopyBorder: '#c4c8e8',
+	btnCopyTxt: '#7880b0',
+	btnCopied: '#059669',
+	btnExport: '#ecfdf5',
+	btnExportTxt: '#065f46',
+	btnExportBorder: '#a7f3d0',
+	btnMore: '#f0f2fa',
+	btnMoreTxt: '#4f46e5',
+	btnMoreBorder: '#c4c8e8',
+	tabActive: 'linear-gradient(135deg,#6d28d9,#4f46e5)',
+	tabActiveTxt: '#fff',
+	tabInactiveTxt: '#9096c0',
+	tabBg: '#eef0fb',
+	errBg: '#fff1f2',
+	errBorder: '#fecdd3',
+	errTxt: '#be123c',
+	lViews: '#2563eb',
+	lSubs: '#7c3aed',
+	lKw: '#059669',
+	lSearch: '#4f46e5',
+};
+
+// ── QuotaCircle ───────────────────────────────────────────────────────────────
+function QuotaCircle({ used, total, T }) {
 	const pct = Math.min(used / total, 1);
 	const remaining = Math.max(total - used, 0);
-	const r = 54;
-	const circ = 2 * Math.PI * r;
-	const dash = circ * (1 - pct);
-
+	const r = 54,
+		circ = 2 * Math.PI * r,
+		dash = circ * (1 - pct);
 	const color = pct < 0.5 ? '#22c55e' : pct < 0.8 ? '#f59e0b' : '#ef4444';
-
 	const [countdown, setCountdown] = useState(getResetSeconds());
 	useEffect(() => {
 		const t = setInterval(() => setCountdown(getResetSeconds()), 1000);
@@ -113,16 +285,14 @@ function QuotaCircle({ used, total }) {
 		>
 			<div style={{ position: 'relative', width: 130, height: 130 }}>
 				<svg width='130' height='130' style={{ transform: 'rotate(-90deg)' }}>
-					{/* track */}
 					<circle
 						cx='65'
 						cy='65'
 						r={r}
 						fill='none'
-						stroke='#1e1e35'
+						stroke={T.quotaRing}
 						strokeWidth='10'
 					/>
-					{/* progress */}
 					<circle
 						cx='65'
 						cy='65'
@@ -136,7 +306,6 @@ function QuotaCircle({ used, total }) {
 						style={{ transition: 'stroke-dashoffset 0.6s ease, stroke 0.4s' }}
 					/>
 				</svg>
-				{/* center text */}
 				<div
 					style={{
 						position: 'absolute',
@@ -159,22 +328,18 @@ function QuotaCircle({ used, total }) {
 					>
 						{remaining.toLocaleString()}
 					</span>
-					<span style={{ color: '#44445a', fontSize: 10, letterSpacing: 0.5 }}>
-						left
-					</span>
+					<span style={{ color: T.textDim, fontSize: 10 }}>left</span>
 				</div>
 			</div>
-
 			<div style={{ textAlign: 'center' }}>
-				<div style={{ color: '#44445a', fontSize: 10, marginBottom: 3 }}>
+				<div style={{ color: T.textDim, fontSize: 10, marginBottom: 3 }}>
 					{used.toLocaleString()} / {total.toLocaleString()} used
 				</div>
-				{/* progress bar */}
 				<div
 					style={{
 						width: 120,
 						height: 4,
-						background: '#1e1e35',
+						background: T.quotaRing,
 						borderRadius: 4,
 						overflow: 'hidden',
 					}}
@@ -190,12 +355,10 @@ function QuotaCircle({ used, total }) {
 					/>
 				</div>
 			</div>
-
-			{/* reset countdown */}
 			<div
 				style={{
-					background: '#0f0f1c',
-					border: '1px solid #1e1e35',
+					background: T.quotaBg,
+					border: `1px solid ${T.border}`,
 					borderRadius: 8,
 					padding: '6px 12px',
 					textAlign: 'center',
@@ -205,7 +368,7 @@ function QuotaCircle({ used, total }) {
 			>
 				<div
 					style={{
-						color: '#44445a',
+						color: T.textDim,
 						fontSize: 9,
 						letterSpacing: 1,
 						marginBottom: 2,
@@ -215,7 +378,7 @@ function QuotaCircle({ used, total }) {
 				</div>
 				<div
 					style={{
-						color: '#6366f1',
+						color: T.accent,
 						fontSize: 14,
 						fontWeight: 700,
 						fontFamily: "'JetBrains Mono', monospace",
@@ -224,20 +387,18 @@ function QuotaCircle({ used, total }) {
 					{fmtCountdown(countdown)}
 				</div>
 			</div>
-
-			{/* per-search cost info */}
 			<div
 				style={{
 					width: '100%',
-					background: '#0f0f1c',
-					border: '1px solid #1e1e35',
+					background: T.quotaBg,
+					border: `1px solid ${T.border}`,
 					borderRadius: 8,
 					padding: '10px 12px',
 				}}
 			>
 				<div
 					style={{
-						color: '#44445a',
+						color: T.textDim,
 						fontSize: 9,
 						letterSpacing: 1,
 						marginBottom: 6,
@@ -246,10 +407,11 @@ function QuotaCircle({ used, total }) {
 					COST PER SEARCH
 				</div>
 				{[
-					{ label: 'Keyword search', cost: '~102 pts' },
-					{ label: 'Video URL lookup', cost: '~1–2 pts' },
-					{ label: 'Load More', cost: '~102 pts' },
-				].map(({ label, cost }) => (
+					['Keyword search', '~102 pts'],
+					['Video URL lookup', '~1–2 pts'],
+					['Bulk URL (per video)', '~2 pts'],
+					['Load More', '~102 pts'],
+				].map(([label, cost]) => (
 					<div
 						key={label}
 						style={{
@@ -258,10 +420,10 @@ function QuotaCircle({ used, total }) {
 							marginBottom: 4,
 						}}
 					>
-						<span style={{ color: '#555575', fontSize: 10 }}>{label}</span>
+						<span style={{ color: T.textMid, fontSize: 10 }}>{label}</span>
 						<span
 							style={{
-								color: '#a78bfa',
+								color: T.accent2,
 								fontSize: 10,
 								fontFamily: "'JetBrains Mono', monospace",
 							}}
@@ -275,130 +437,16 @@ function QuotaCircle({ used, total }) {
 	);
 }
 
-// ── Suggestions Panel ────────────────────────────────────────────────────────
-const SUGGESTIONS = [
-	{
-		icon: '📅',
-		title: 'Date filter',
-		desc: 'Upload date অনুযায়ী filter করুন — last 24h, week, month, year।',
-	},
-	{
-		icon: '⏱',
-		title: 'Video duration filter',
-		desc: 'Short (<4min), Medium, Long (>20min) অনুযায়ী filter।',
-	},
-	{
-		icon: '🌍',
-		title: 'Region filter',
-		desc: 'Specific country-র trending videos খোঁজার option।',
-	},
-	{
-		icon: '📊',
-		title: 'Engagement rate',
-		desc: 'Views ÷ Subscribers ratio দেখালে viral potential বোঝা যায়।',
-	},
-	{
-		icon: '🔁',
-		title: 'Bulk URL input',
-		desc: 'একসাথে অনেকগুলো video URL paste করে সব-এর stats দেখুন।',
-	},
-	{
-		icon: '💾',
-		title: 'Export to CSV',
-		desc: 'Filtered results CSV/Excel হিসেবে download করুন।',
-	},
-	{
-		icon: '🔔',
-		title: 'Like/Comment count',
-		desc: 'Likes ও comments count দেখান — engagement বোঝার জন্য।',
-	},
-	{
-		icon: '📌',
-		title: 'Save searches',
-		desc: 'বারবার ব্যবহার করা filters save করে রাখুন।',
-	},
-];
-
-function SuggestionPanel() {
-	const [open, setOpen] = useState(false);
-	return (
-		<div style={{ marginTop: 16 }}>
-			<button
-				onClick={() => setOpen((o) => !o)}
-				style={{
-					width: '100%',
-					background: '#0f0f1c',
-					border: '1px solid #2a2a40',
-					borderRadius: 8,
-					padding: '8px 12px',
-					color: '#6366f1',
-					fontSize: 11,
-					fontWeight: 700,
-					cursor: 'pointer',
-					fontFamily: 'inherit',
-					display: 'flex',
-					justifyContent: 'space-between',
-					alignItems: 'center',
-					letterSpacing: 0.5,
-				}}
-			>
-				<span>💡 IMPROVEMENTS</span>
-				<span style={{ fontSize: 10, color: '#44445a' }}>
-					{open ? '▲' : '▼'}
-				</span>
-			</button>
-
-			{open && (
-				<div
-					style={{
-						marginTop: 8,
-						display: 'flex',
-						flexDirection: 'column',
-						gap: 6,
-					}}
-				>
-					{SUGGESTIONS.map(({ icon, title, desc }) => (
-						<div
-							key={title}
-							style={{
-								background: '#0b0b16',
-								border: '1px solid #1c1c2e',
-								borderRadius: 8,
-								padding: '8px 10px',
-							}}
-						>
-							<div
-								style={{
-									color: '#e0e0ff',
-									fontSize: 11,
-									fontWeight: 700,
-									marginBottom: 2,
-								}}
-							>
-								{icon} {title}
-							</div>
-							<div style={{ color: '#555575', fontSize: 10, lineHeight: 1.4 }}>
-								{desc}
-							</div>
-						</div>
-					))}
-				</div>
-			)}
-		</div>
-	);
-}
-
-// ── RowCopyBtn ────────────────────────────────────────────────────────────────
-function RowCopyBtn({ v }) {
+function RowCopyBtn({ v, T }) {
 	const [copied, setCopied] = useState(false);
 	const { html, plain } = makeLines(v);
 	return (
 		<button
 			onClick={() => copyRich([html], [plain], setCopied)}
 			style={{
-				background: copied ? '#16a34a' : '#18181b',
-				color: copied ? '#fff' : '#a1a1aa',
-				border: `1px solid ${copied ? '#16a34a' : '#3f3f46'}`,
+				background: copied ? T.btnCopied : T.btnCopy,
+				color: copied ? '#fff' : T.btnCopyTxt,
+				border: `1px solid ${copied ? T.btnCopied : T.btnCopyBorder}`,
 				borderRadius: 6,
 				padding: '4px 12px',
 				fontSize: 11,
@@ -413,17 +461,16 @@ function RowCopyBtn({ v }) {
 	);
 }
 
-// ── SortBtn ───────────────────────────────────────────────────────────────────
-function SortBtn({ label, field, sortState, onSort }) {
+function SortBtn({ label, field, sortState, onSort, T, isDark }) {
 	const active = sortState.field === field;
 	const dir = active ? sortState.dir : null;
 	return (
 		<button
 			onClick={() => onSort(field)}
 			style={{
-				background: active ? '#1e1b4b' : 'transparent',
-				color: active ? '#a78bfa' : '#44445a',
-				border: `1px solid ${active ? '#4c1d95' : '#2a2a40'}`,
+				background: active ? (isDark ? '#1e1b4b' : '#ede9fe') : 'transparent',
+				color: active ? T.accent2 : T.textDim,
+				border: `1px solid ${active ? T.accent2 : T.border3}`,
 				borderRadius: 6,
 				padding: '3px 10px',
 				fontSize: 11,
@@ -434,7 +481,7 @@ function SortBtn({ label, field, sortState, onSort }) {
 				gap: 4,
 			}}
 		>
-			{label}
+			{label}{' '}
 			<span style={{ fontSize: 10 }}>
 				{dir === 'desc' ? '↓' : dir === 'asc' ? '↑' : '↕'}
 			</span>
@@ -442,9 +489,10 @@ function SortBtn({ label, field, sortState, onSort }) {
 	);
 }
 
-// ── VideoRow ──────────────────────────────────────────────────────────────────
-function VideoRow({ v, idx }) {
+function VideoRow({ v, idx, isHighlighted, T }) {
 	const url = `https://www.youtube.com/watch?v=${v.id}`;
+	const baseBg = idx % 2 === 0 ? T.rowEven : T.rowOdd;
+	const rowBg = isHighlighted ? T.rowHL : baseBg;
 	return (
 		<div
 			style={{
@@ -453,19 +501,23 @@ function VideoRow({ v, idx }) {
 				alignItems: 'center',
 				gap: 12,
 				padding: '11px 16px',
-				borderBottom: '1px solid #1c1c27',
-				background: idx % 2 === 0 ? '#0b0b16' : '#0d0d1a',
+				borderBottom: `1px solid ${T.border2}`,
+				borderLeft: isHighlighted
+					? `3px solid ${T.rowHLBorder}`
+					: '3px solid transparent',
+				background: rowBg,
 				transition: 'background .1s',
 			}}
-			onMouseEnter={(e) => (e.currentTarget.style.background = '#13132a')}
-			onMouseLeave={(e) =>
-				(e.currentTarget.style.background =
-					idx % 2 === 0 ? '#0b0b16' : '#0d0d1a')
+			onMouseEnter={(e) =>
+				(e.currentTarget.style.background = isHighlighted
+					? T.rowHLHover
+					: T.rowHover)
 			}
+			onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
 		>
 			<span
 				style={{
-					color: '#44445a',
+					color: T.textDim,
 					fontSize: 12,
 					fontFamily: 'monospace',
 					textAlign: 'center',
@@ -473,60 +525,104 @@ function VideoRow({ v, idx }) {
 			>
 				{idx + 1}
 			</span>
-
 			<div style={{ minWidth: 0 }}>
-				<a
-					href={url}
-					target='_blank'
-					rel='noreferrer'
-					style={{
-						color: '#e4e4f0',
-						fontWeight: 600,
-						fontSize: 13,
-						whiteSpace: 'nowrap',
-						overflow: 'hidden',
-						textOverflow: 'ellipsis',
-						marginBottom: 3,
-						textDecoration: 'none',
-						display: 'block',
-					}}
-					title={v.title}
-					onMouseEnter={(e) => (e.currentTarget.style.color = '#a78bfa')}
-					onMouseLeave={(e) => (e.currentTarget.style.color = '#e4e4f0')}
-				>
-					{v.title}
-				</a>
 				<div
 					style={{
-						color: '#6366f1',
-						fontSize: 11,
-						whiteSpace: 'nowrap',
-						overflow: 'hidden',
-						textOverflow: 'ellipsis',
+						display: 'flex',
+						alignItems: 'center',
+						gap: 6,
+						marginBottom: 3,
 					}}
 				>
-					📺 {v.channelTitle}
+					{isHighlighted && (
+						<span
+							style={{
+								background: T.pillHL,
+								color: T.pillHLText,
+								fontSize: 9,
+								padding: '1px 6px',
+								borderRadius: 4,
+								fontWeight: 700,
+								fontFamily: "'JetBrains Mono', monospace",
+								whiteSpace: 'nowrap',
+								flexShrink: 0,
+							}}
+						>
+							✦ MATCH
+						</span>
+					)}
+					<a
+						href={url}
+						target='_blank'
+						rel='noreferrer'
+						style={{
+							color: T.textRow,
+							fontWeight: 600,
+							fontSize: 13,
+							whiteSpace: 'nowrap',
+							overflow: 'hidden',
+							textOverflow: 'ellipsis',
+							textDecoration: 'none',
+							display: 'block',
+						}}
+						title={v.title}
+						onMouseEnter={(e) => (e.currentTarget.style.color = T.accent2)}
+						onMouseLeave={(e) => (e.currentTarget.style.color = T.textRow)}
+					>
+						{v.title}
+					</a>
+				</div>
+				<div
+					style={{
+						display: 'flex',
+						gap: 6,
+						alignItems: 'center',
+						flexWrap: 'wrap',
+					}}
+				>
+					<div
+						style={{
+							color: T.accent,
+							fontSize: 11,
+							whiteSpace: 'nowrap',
+							overflow: 'hidden',
+							textOverflow: 'ellipsis',
+						}}
+					>
+						📺 {v.channelTitle}
+					</div>
+					{v.sourceKeyword && (
+						<span
+							style={{
+								background: T.tagBg,
+								color: T.tagText,
+								fontSize: 9,
+								padding: '1px 6px',
+								borderRadius: 4,
+								fontFamily: "'JetBrains Mono', monospace",
+								whiteSpace: 'nowrap',
+							}}
+						>
+							🔠 {v.sourceKeyword}
+						</span>
+					)}
 				</div>
 			</div>
-
 			<div style={{ textAlign: 'right' }}>
-				<div style={{ color: '#a78bfa', fontSize: 12, fontWeight: 600 }}>
+				<div style={{ color: T.accent2, fontSize: 12, fontWeight: 600 }}>
 					{fmt(v.subscriberCount)}
 				</div>
-				<div style={{ color: '#44445a', fontSize: 10 }}>subscribers</div>
+				<div style={{ color: T.textDim, fontSize: 10 }}>subscribers</div>
 			</div>
-
 			<div style={{ textAlign: 'right' }}>
-				<div style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600 }}>
+				<div style={{ color: T.accent3, fontSize: 12, fontWeight: 600 }}>
 					{fmt(v.viewCount)}
 				</div>
-				<div style={{ color: '#44445a', fontSize: 10 }}>views</div>
+				<div style={{ color: T.textDim, fontSize: 10 }}>views</div>
 			</div>
-
 			<div style={{ display: 'flex', justifyContent: 'center' }}>
-				<RowCopyBtn v={v} />
+				<RowCopyBtn v={v} T={T} />
 			</div>
-
 			<div style={{ display: 'flex', justifyContent: 'center' }}>
 				<a
 					href={url}
@@ -551,25 +647,30 @@ function VideoRow({ v, idx }) {
 	);
 }
 
-// ── styles ────────────────────────────────────────────────────────────────────
-const inputSt = {
-	background: '#0f0f1c',
-	border: '1px solid #2a2a40',
-	borderRadius: 8,
-	color: '#e0e0ff',
-	padding: '8px 12px',
-	fontSize: 13,
-	outline: 'none',
-	fontFamily: 'inherit',
-	width: '100%',
-	boxSizing: 'border-box',
-};
-const numSt = { ...inputSt, width: 100 };
-
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
+	const [darkMode, setDarkMode] = useState(true);
+	const T = darkMode ? DARK : LIGHT;
+	const inputSt = {
+		background: T.inputBg,
+		border: `1px solid ${T.border3}`,
+		borderRadius: 8,
+		color: T.text,
+		padding: '8px 12px',
+		fontSize: 13,
+		outline: 'none',
+		fontFamily: 'inherit',
+		width: '100%',
+		boxSizing: 'border-box',
+	};
+	const numSt = { ...inputSt, width: 100 };
+
 	const [query, setQuery] = useState('');
 	const [videoUrl, setVideoUrl] = useState('');
+	const [bulkUrls, setBulkUrls] = useState('');
+	const [bulkKeywords, setBulkKeywords] = useState('');
+	const [activeTab, setActiveTab] = useState('keyword');
+	const [region, setRegion] = useState('US');
 	const [minViews, setMinViews] = useState('');
 	const [maxViews, setMaxViews] = useState('');
 	const [minSubs, setMinSubs] = useState('');
@@ -582,23 +683,32 @@ export default function App() {
 	const [searched, setSearched] = useState(false);
 	const [allCopied, setAllCopied] = useState(false);
 	const [sort, setSort] = useState({ field: null, dir: null });
-	const [quotaUsed, setQuotaUsed] = useState(loadQuota);
+	const [quotaUsed, setQuotaUsed] = useState(0);
+	const [quotaLoaded, setQuotaLoaded] = useState(false);
+	const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
+
+	// Load quota from persistent storage on mount
+	useEffect(() => {
+		loadQuotaFromStorage().then((val) => {
+			setQuotaUsed(val);
+			setQuotaLoaded(true);
+		});
+	}, []);
 
 	const addQuota = (pts) => {
 		setQuotaUsed((prev) => {
 			const next = prev + pts;
-			saveQuota(next);
+			saveQuotaToStorage(next);
 			return next;
 		});
 	};
 
-	const handleSort = (field) => {
+	const handleSort = (field) =>
 		setSort((prev) => {
 			if (prev.field !== field) return { field, dir: 'desc' };
 			if (prev.dir === 'desc') return { field, dir: 'asc' };
 			return { field: null, dir: null };
 		});
-	};
 
 	const results = useMemo(() => {
 		const kwList = keywords
@@ -625,17 +735,13 @@ export default function App() {
 		return arr;
 	}, [rawResults, minViews, maxViews, minSubs, maxSubs, keywords, sort]);
 
-	// const fetchChannelSubs = async (channelId) => {
-	// 	try {
-	// 		const r = await fetch(
-	// 			`https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelId}&key=${API_KEY}`
-	// 		);
-	// 		const d = await r.json();
-	// 		return parseInt(d.items?.[0]?.statistics?.subscriberCount ?? -1);
-	// 	} catch {
-	// 		return -1;
-	// 	}
-	// };
+	const highlightedIds = useMemo(() => {
+		const set = new Set();
+		results.forEach((v) => {
+			if (getMatchScore(v, query, keywords) >= 0.5) set.add(v.id);
+		});
+		return set;
+	}, [results, query, keywords]);
 
 	const extractVideoId = (input) => {
 		input = input.trim();
@@ -645,22 +751,159 @@ export default function App() {
 		return null;
 	};
 
+	const fetchChannelSubs = async (items, quotaRef) => {
+		const channelIds = [...new Set(items.map((i) => i.snippet.channelId))];
+		const subMap = {};
+		for (let j = 0; j < channelIds.length; j += 50) {
+			try {
+				const r = await fetch(
+					`https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelIds.slice(j, j + 50).join(',')}&key=${API_KEY}`
+				);
+				const d = await r.json();
+				(d.items || []).forEach((item) => {
+					subMap[item.id] = parseInt(item.statistics?.subscriberCount ?? -1);
+				});
+				quotaRef.cost += QUOTA_COSTS.channels;
+			} catch {}
+		}
+		return subMap;
+	};
+
+	const doBulkSearch = useCallback(async () => {
+		const ids = bulkUrls
+			.split('\n')
+			.map((l) => l.trim())
+			.filter(Boolean)
+			.map(extractVideoId)
+			.filter(Boolean);
+		if (ids.length === 0) {
+			setError('⚠️ Valid YouTube URL বা Video ID পাওয়া যায়নি।');
+			return;
+		}
+		setLoading(true);
+		setError('');
+		setRawResults([]);
+		setBulkProgress({ current: 0, total: ids.length });
+		try {
+			const allVideos = [];
+			const q = { cost: 0 };
+			for (let i = 0; i < ids.length; i += 50) {
+				const batch = ids.slice(i, i + 50);
+				const dr = await fetch(
+					`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${batch.join(',')}&key=${API_KEY}`
+				);
+				const dd = await dr.json();
+				if (dd.error) throw new Error(dd.error.message);
+				q.cost += QUOTA_COSTS.videos;
+				const subMap = await fetchChannelSubs(dd.items || [], q);
+				(dd.items || []).forEach((item) =>
+					allVideos.push({
+						id: item.id,
+						title: item.snippet.title,
+						channelTitle: item.snippet.channelTitle,
+						channelId: item.snippet.channelId,
+						viewCount: parseInt(item.statistics?.viewCount ?? -1),
+						subscriberCount: subMap[item.snippet.channelId] ?? -1,
+						tags: item.snippet.tags ?? [],
+					})
+				);
+				setBulkProgress({
+					current: Math.min(i + 50, ids.length),
+					total: ids.length,
+				});
+			}
+			addQuota(q.cost);
+			setRawResults(allVideos);
+			setSearched(true);
+		} catch (e) {
+			setError('❌ ' + e.message);
+		} finally {
+			setLoading(false);
+			setBulkProgress({ current: 0, total: 0 });
+		}
+	}, [bulkUrls]);
+
+	const doBulkKeywordSearch = useCallback(async () => {
+		const kwLines = bulkKeywords
+			.split('\n')
+			.map((l) => l.trim())
+			.filter(Boolean);
+		if (kwLines.length === 0) {
+			setError('⚠️ কমপক্ষে একটা keyword দিন।');
+			return;
+		}
+		setLoading(true);
+		setError('');
+		setRawResults([]);
+		setBulkProgress({ current: 0, total: kwLines.length });
+		try {
+			const allVideos = [];
+			const seenIds = new Set();
+			const q = { cost: 0 };
+			for (let ki = 0; ki < kwLines.length; ki++) {
+				const kw = kwLines[ki];
+				try {
+					const sr = await fetch(
+						`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=20&q=${encodeURIComponent(kw)}&regionCode=${region}&key=${API_KEY}`
+					);
+					const sd = await sr.json();
+					if (sd.error) throw new Error(sd.error.message);
+					q.cost += QUOTA_COSTS.search;
+					const ids = (sd.items || [])
+						.map((i) => i.id.videoId)
+						.filter((id) => !seenIds.has(id));
+					if (ids.length > 0) {
+						const dr = await fetch(
+							`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${ids.join(',')}&key=${API_KEY}`
+						);
+						const dd = await dr.json();
+						if (dd.error) throw new Error(dd.error.message);
+						q.cost += QUOTA_COSTS.videos;
+						const subMap = await fetchChannelSubs(dd.items || [], q);
+						(dd.items || []).forEach((item) => {
+							if (!seenIds.has(item.id)) {
+								seenIds.add(item.id);
+								allVideos.push({
+									id: item.id,
+									title: item.snippet.title,
+									channelTitle: item.snippet.channelTitle,
+									channelId: item.snippet.channelId,
+									viewCount: parseInt(item.statistics?.viewCount ?? -1),
+									subscriberCount: subMap[item.snippet.channelId] ?? -1,
+									tags: item.snippet.tags ?? [],
+									sourceKeyword: kw,
+								});
+							}
+						});
+					}
+				} catch {}
+				setBulkProgress({ current: ki + 1, total: kwLines.length });
+			}
+			addQuota(q.cost);
+			setRawResults(allVideos);
+			setSearched(true);
+		} catch (e) {
+			setError('❌ ' + e.message);
+		} finally {
+			setLoading(false);
+			setBulkProgress({ current: 0, total: 0 });
+		}
+	}, [bulkKeywords, region]);
+
 	const doSearch = useCallback(
 		async (pageToken = '') => {
-			const hasQuery = query.trim();
-			const hasUrl = videoUrl.trim();
+			const hasQuery = query.trim(),
+				hasUrl = videoUrl.trim();
 			if (!hasQuery && !hasUrl) {
 				setError('⚠️ Search query অথবা video URL দিন।');
 				return;
 			}
 			setLoading(true);
 			setError('');
-
 			try {
-				let rawItems = [];
-				let nextToken = '';
-				let quotaCost = 0;
-
+				let rawItems = [],
+					nextToken = '';
+				const q = { cost: 0 };
 				if (hasUrl) {
 					const vid = extractVideoId(videoUrl);
 					if (!vid) throw new Error('Invalid YouTube URL or video ID.');
@@ -670,48 +913,24 @@ export default function App() {
 					const d = await r.json();
 					if (d.error) throw new Error(d.error.message);
 					rawItems = d.items || [];
-					quotaCost += QUOTA_COSTS.videos;
+					q.cost += QUOTA_COSTS.videos;
 				} else {
-					let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=20&q=${encodeURIComponent(query)}&key=${API_KEY}`;
+					let url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=20&q=${encodeURIComponent(query)}&regionCode=${region}&key=${API_KEY}`;
 					if (pageToken) url += `&pageToken=${pageToken}`;
 					const sr = await fetch(url);
 					const sd = await sr.json();
 					if (sd.error) throw new Error(sd.error.message);
 					nextToken = sd.nextPageToken ?? '';
-					const ids = sd.items.map((i) => i.id.videoId);
 					const dr = await fetch(
-						`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${ids.join(',')}&key=${API_KEY}`
+						`https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet&id=${sd.items.map((i) => i.id.videoId).join(',')}&key=${API_KEY}`
 					);
 					const dd = await dr.json();
 					if (dd.error) throw new Error(dd.error.message);
 					rawItems = dd.items || [];
-					quotaCost += QUOTA_COSTS.search + QUOTA_COSTS.videos;
+					q.cost += QUOTA_COSTS.search + QUOTA_COSTS.videos;
 				}
-
-				const channelIds = [
-					...new Set(rawItems.map((i) => i.snippet.channelId)),
-				];
-				const subMap = {};
-				// batch channel requests — 1 quota cost per call regardless of how many ids
-				const batchSize = 50;
-				for (let i = 0; i < channelIds.length; i += batchSize) {
-					const batch = channelIds.slice(i, i + batchSize);
-					try {
-						const r = await fetch(
-							`https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${batch.join(',')}&key=${API_KEY}`
-						);
-						const d = await r.json();
-						(d.items || []).forEach((item) => {
-							subMap[item.id] = parseInt(
-								item.statistics?.subscriberCount ?? -1
-							);
-						});
-						quotaCost += QUOTA_COSTS.channels;
-					} catch {}
-				}
-
-				addQuota(quotaCost);
-
+				const subMap = await fetchChannelSubs(rawItems, q);
+				addQuota(q.cost);
 				const videos = rawItems.map((item) => ({
 					id: item.id,
 					title: item.snippet.title,
@@ -721,7 +940,6 @@ export default function App() {
 					subscriberCount: subMap[item.snippet.channelId] ?? -1,
 					tags: item.snippet.tags ?? [],
 				}));
-
 				setRawResults((prev) => (pageToken ? [...prev, ...videos] : videos));
 				setNextPageToken(nextToken);
 				setSearched(true);
@@ -731,22 +949,39 @@ export default function App() {
 				setLoading(false);
 			}
 		},
-		[query, videoUrl]
+		[query, videoUrl, region]
 	);
 
-	const copyAll = () => {
-		const htmlLines = results.map((v) => makeLines(v).html);
-		const plainLines = results.map((v) => makeLines(v).plain);
-		copyRich(htmlLines, plainLines, setAllCopied);
-	};
+	const copyAll = () =>
+		copyRich(
+			results.map((v) => makeLines(v).html),
+			results.map((v) => makeLines(v).plain),
+			setAllCopied
+		);
+	const tabStyle = (tab) => ({
+		padding: '7px 16px',
+		fontSize: 11,
+		fontWeight: 700,
+		cursor: 'pointer',
+		border: 'none',
+		borderRadius: 7,
+		fontFamily: 'inherit',
+		letterSpacing: 0.5,
+		transition: 'all .15s',
+		background: activeTab === tab ? T.tabActive : 'transparent',
+		color: activeTab === tab ? T.tabActiveTxt : T.tabInactiveTxt,
+		boxShadow: activeTab === tab ? '0 0 12px #6d28d944' : 'none',
+	});
+	const highlightCount = results.filter((v) => highlightedIds.has(v.id)).length;
 
 	return (
 		<div
 			style={{
 				minHeight: '100vh',
-				background: '#07070f',
-				color: '#e0e0ff',
+				background: T.bg,
+				color: T.text,
 				fontFamily: "'Syne', sans-serif",
+				transition: 'background 0.3s, color 0.3s',
 			}}
 		>
 			<link
@@ -757,66 +992,140 @@ export default function App() {
 			{/* header */}
 			<div
 				style={{
-					background: 'linear-gradient(135deg,#1a0533,#0f0f2e)',
-					borderBottom: '1px solid #1e1e3a',
+					background: T.headerBg,
+					borderBottom: `1px solid ${T.border}`,
 					padding: '18px 28px',
 					display: 'flex',
 					alignItems: 'center',
 					gap: 14,
+					justifyContent: 'space-between',
 				}}
 			>
-				<div
-					style={{
-						width: 34,
-						height: 34,
-						background: '#dc2626',
-						borderRadius: 8,
-						display: 'flex',
-						alignItems: 'center',
-						justifyContent: 'center',
-						fontSize: 16,
-					}}
-				>
-					▶
-				</div>
-				<div>
-					<h1 style={{ margin: 0, fontSize: 20, fontWeight: 800 }}>
-						YouTube Filter Search
-					</h1>
-					<p style={{ margin: 0, color: '#6366f1', fontSize: 11 }}>
-						যেকোনো একটা input দিলেই চলবে · Sort · Filter · Copy
-					</p>
-				</div>
-			</div>
-
-			{/* two-column layout */}
-			<div
-				style={{ display: 'flex', gap: 0, maxWidth: 1280, margin: '0 auto' }}
-			>
-				{/* ── main content ── */}
-				<div style={{ flex: 1, padding: '24px 20px', minWidth: 0 }}>
-					{/* input panel */}
+				<div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
 					<div
 						style={{
-							background: '#0d0d1a',
-							border: '1px solid #1e1e35',
+							width: 34,
+							height: 34,
+							background: '#dc2626',
+							borderRadius: 8,
+							display: 'flex',
+							alignItems: 'center',
+							justifyContent: 'center',
+							fontSize: 16,
+						}}
+					>
+						▶
+					</div>
+					<div>
+						<h1
+							style={{
+								margin: 0,
+								fontSize: 20,
+								fontWeight: 800,
+								color: T.text,
+							}}
+						>
+							YouTube Filter Search
+						</h1>
+						<p style={{ margin: 0, color: T.accent, fontSize: 11 }}>
+							Search and filter YouTube videos with advanced criteria. Powered
+							by Makin
+						</p>
+					</div>
+				</div>
+				<button
+					onClick={() => setDarkMode((d) => !d)}
+					title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+					style={{
+						background: darkMode ? '#1e1e35' : '#e0e4f5',
+						border: `1px solid ${T.border3}`,
+						borderRadius: 50,
+						width: 52,
+						height: 28,
+						cursor: 'pointer',
+						position: 'relative',
+						transition: 'background 0.3s',
+						flexShrink: 0,
+					}}
+				>
+					<div
+						style={{
+							position: 'absolute',
+							top: 3,
+							left: darkMode ? 26 : 3,
+							width: 20,
+							height: 20,
+							borderRadius: '50%',
+							background: darkMode ? '#6366f1' : '#fbbf24',
+							display: 'flex',
+							alignItems: 'center',
+							justifyContent: 'center',
+							fontSize: 11,
+							transition: 'left 0.3s, background 0.3s',
+							boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+						}}
+					>
+						{darkMode ? '🌙' : '☀️'}
+					</div>
+				</button>
+			</div>
+
+			<div style={{ display: 'flex', maxWidth: 1280, margin: '0 auto' }}>
+				{/* main */}
+				<div style={{ flex: 1, padding: '24px 20px', minWidth: 0 }}>
+					<div
+						style={{
+							background: T.surface,
+							border: `1px solid ${T.border}`,
 							borderRadius: 14,
 							padding: 20,
 							marginBottom: 18,
 						}}
 					>
+						{/* Tabs */}
 						<div
 							style={{
-								display: 'grid',
-								gridTemplateColumns: '1fr 1fr',
-								gap: 12,
-								marginBottom: 14,
+								display: 'flex',
+								gap: 4,
+								marginBottom: 16,
+								background: T.tabBg,
+								borderRadius: 10,
+								padding: 4,
+								width: 'fit-content',
+								flexWrap: 'wrap',
 							}}
 						>
-							<div>
+							<button
+								style={tabStyle('keyword')}
+								onClick={() => setActiveTab('keyword')}
+							>
+								🔍 Keyword
+							</button>
+							<button
+								style={tabStyle('url')}
+								onClick={() => setActiveTab('url')}
+							>
+								🔗 Single URL
+							</button>
+							<button
+								style={tabStyle('bulk')}
+								onClick={() => setActiveTab('bulk')}
+							>
+								📋 Bulk URLs
+							</button>
+							<button
+								style={tabStyle('bulkKeyword')}
+								onClick={() => setActiveTab('bulkKeyword')}
+							>
+								🔠 Bulk Keywords
+							</button>
+						</div>
+
+						{activeTab === 'keyword' && (
+							<div style={{ marginBottom: 14 }}>
 								<label
 									style={{
-										color: '#6366f1',
+										color: T.lSearch,
 										fontSize: 10,
 										fontWeight: 700,
 										display: 'block',
@@ -828,22 +1137,21 @@ export default function App() {
 								</label>
 								<input
 									type='text'
-									placeholder='e.g. react tutorial 2024'
+									placeholder='best tourist places in japan'
 									value={query}
-									onChange={(e) => {
-										setQuery(e.target.value);
-										if (e.target.value) setVideoUrl('');
-									}}
+									onChange={(e) => setQuery(e.target.value)}
 									onKeyDown={(e) =>
 										e.key === 'Enter' && (setRawResults([]), doSearch())
 									}
 									style={inputSt}
 								/>
 							</div>
-							<div>
+						)}
+						{activeTab === 'url' && (
+							<div style={{ marginBottom: 14 }}>
 								<label
 									style={{
-										color: '#6366f1',
+										color: T.lSearch,
 										fontSize: 10,
 										fontWeight: 700,
 										display: 'block',
@@ -851,27 +1159,177 @@ export default function App() {
 										letterSpacing: 1,
 									}}
 								>
-									🔗 VIDEO URL / ID{' '}
-									<span style={{ color: '#33334a', fontWeight: 400 }}>
-										(optional)
-									</span>
+									🔗 VIDEO URL / ID
 								</label>
 								<input
 									type='text'
 									placeholder='https://youtube.com/watch?v=...'
 									value={videoUrl}
-									onChange={(e) => {
-										setVideoUrl(e.target.value);
-										if (e.target.value) setQuery('');
-									}}
+									onChange={(e) => setVideoUrl(e.target.value)}
 									onKeyDown={(e) =>
 										e.key === 'Enter' && (setRawResults([]), doSearch())
 									}
 									style={inputSt}
 								/>
 							</div>
-						</div>
+						)}
+						{activeTab === 'bulkKeyword' && (
+							<div style={{ marginBottom: 14 }}>
+								<label
+									style={{
+										color: T.accentAmber,
+										fontSize: 10,
+										fontWeight: 700,
+										display: 'block',
+										marginBottom: 4,
+										letterSpacing: 1,
+									}}
+								>
+									🔠 BULK KEYWORDS{' '}
+									<span style={{ color: T.textMid, fontWeight: 400 }}>
+										(প্রতি line এ একটা keyword)
+									</span>
+								</label>
+								<textarea
+									placeholder={
+										'best travel vlog 2024\njapan street food\nbudget travel tips'
+									}
+									value={bulkKeywords}
+									onChange={(e) => setBulkKeywords(e.target.value)}
+									rows={5}
+									style={{ ...inputSt, resize: 'vertical', lineHeight: 1.6 }}
+								/>
+								<p
+									style={{ color: T.textMid, fontSize: 10, margin: '6px 0 0' }}
+								>
+									💡 প্রতিটা keyword এর জন্য আলাদা search হবে — সব results
+									একসাথে দেখাবে, duplicate বাদ যাবে
+								</p>
+								{loading && bulkProgress.total > 0 && (
+									<div style={{ marginTop: 10 }}>
+										<div
+											style={{
+												display: 'flex',
+												justifyContent: 'space-between',
+												marginBottom: 4,
+											}}
+										>
+											<span style={{ color: T.accentAmber, fontSize: 10 }}>
+												Searching:{' '}
+												{bulkProgress.current < bulkProgress.total
+													? `"${bulkKeywords.split('\n').filter(Boolean)[bulkProgress.current] || ''}"`
+													: 'Done'}
+											</span>
+											<span
+												style={{
+													color: T.textDim,
+													fontSize: 10,
+													fontFamily: "'JetBrains Mono', monospace",
+												}}
+											>
+												{bulkProgress.current} / {bulkProgress.total}
+											</span>
+										</div>
+										<div
+											style={{
+												height: 4,
+												background: T.border,
+												borderRadius: 4,
+												overflow: 'hidden',
+											}}
+										>
+											<div
+												style={{
+													width: `${(bulkProgress.current / bulkProgress.total) * 100}%`,
+													height: '100%',
+													background: T.accentAmber,
+													borderRadius: 4,
+													transition: 'width 0.3s',
+												}}
+											/>
+										</div>
+									</div>
+								)}
+							</div>
+						)}
+						{activeTab === 'bulk' && (
+							<div style={{ marginBottom: 14 }}>
+								<label
+									style={{
+										color: T.accentAmber,
+										fontSize: 10,
+										fontWeight: 700,
+										display: 'block',
+										marginBottom: 4,
+										letterSpacing: 1,
+									}}
+								>
+									📋 BULK URLs{' '}
+									<span style={{ color: T.textMid, fontWeight: 400 }}>
+										(প্রতি line এ একটা URL বা Video ID)
+									</span>
+								</label>
+								<textarea
+									placeholder={
+										'https://youtube.com/watch?v=abc123\nhttps://youtu.be/def456\nghi789'
+									}
+									value={bulkUrls}
+									onChange={(e) => setBulkUrls(e.target.value)}
+									rows={5}
+									style={{ ...inputSt, resize: 'vertical', lineHeight: 1.6 }}
+								/>
+								<p
+									style={{ color: T.textMid, fontSize: 10, margin: '6px 0 0' }}
+								>
+									💡 YouTube link, youtu.be link, অথবা শুধু Video ID — সব format
+									সাপোর্ট করে
+								</p>
+								{loading && bulkProgress.total > 0 && (
+									<div style={{ marginTop: 10 }}>
+										<div
+											style={{
+												display: 'flex',
+												justifyContent: 'space-between',
+												marginBottom: 4,
+											}}
+										>
+											<span style={{ color: T.accentAmber, fontSize: 10 }}>
+												Processing...
+											</span>
+											<span
+												style={{
+													color: T.textDim,
+													fontSize: 10,
+													fontFamily: "'JetBrains Mono', monospace",
+												}}
+											>
+												{bulkProgress.current} / {bulkProgress.total}
+											</span>
+										</div>
+										<div
+											style={{
+												height: 4,
+												background: T.border,
+												borderRadius: 4,
+												overflow: 'hidden',
+											}}
+										>
+											<div
+												style={{
+													width: `${(bulkProgress.current / bulkProgress.total) * 100}%`,
+													height: '100%',
+													background: T.accentAmber,
+													borderRadius: 4,
+													transition: 'width 0.3s',
+												}}
+											/>
+										</div>
+									</div>
+								)}
+							</div>
+						)}
 
+						{/* Filters row */}
 						<div
 							style={{
 								display: 'flex',
@@ -880,10 +1338,47 @@ export default function App() {
 								flexWrap: 'wrap',
 							}}
 						>
+							{/* Region */}
 							<div>
 								<label
 									style={{
-										color: '#60a5fa',
+										color: T.accent4,
+										fontSize: 10,
+										fontWeight: 700,
+										display: 'block',
+										marginBottom: 4,
+										letterSpacing: 1,
+									}}
+								>
+									🌍 REGION
+								</label>
+								<select
+									value={region}
+									onChange={(e) => setRegion(e.target.value)}
+									style={{
+										background: T.selectBg,
+										border: `1px solid ${T.border3}`,
+										borderRadius: 8,
+										color: T.text,
+										padding: '8px 10px',
+										fontSize: 12,
+										outline: 'none',
+										fontFamily: 'inherit',
+										cursor: 'pointer',
+										height: 37,
+									}}
+								>
+									{REGIONS.map(({ code, label }) => (
+										<option key={code} value={code}>
+											{label}
+										</option>
+									))}
+								</select>
+							</div>
+							<div>
+								<label
+									style={{
+										color: T.lViews,
 										fontSize: 10,
 										fontWeight: 700,
 										display: 'block',
@@ -901,7 +1396,7 @@ export default function App() {
 										onChange={(e) => setMinViews(e.target.value)}
 										style={numSt}
 									/>
-									<span style={{ color: '#44445a' }}>–</span>
+									<span style={{ color: T.textDim }}>–</span>
 									<input
 										type='number'
 										placeholder='Max'
@@ -914,7 +1409,7 @@ export default function App() {
 							<div>
 								<label
 									style={{
-										color: '#a78bfa',
+										color: T.lSubs,
 										fontSize: 10,
 										fontWeight: 700,
 										display: 'block',
@@ -932,7 +1427,7 @@ export default function App() {
 										onChange={(e) => setMinSubs(e.target.value)}
 										style={numSt}
 									/>
-									<span style={{ color: '#44445a' }}>–</span>
+									<span style={{ color: T.textDim }}>–</span>
 									<input
 										type='number'
 										placeholder='Max'
@@ -945,7 +1440,7 @@ export default function App() {
 							<div style={{ flex: 1, minWidth: 140 }}>
 								<label
 									style={{
-										color: '#34d399',
+										color: T.lKw,
 										fontSize: 10,
 										fontWeight: 700,
 										display: 'block',
@@ -954,13 +1449,13 @@ export default function App() {
 									}}
 								>
 									🏷 KEYWORDS{' '}
-									<span style={{ color: '#33334a', fontWeight: 400 }}>
+									<span style={{ color: T.textMid, fontWeight: 400 }}>
 										(comma)
 									</span>
 								</label>
 								<input
 									type='text'
-									placeholder='react, hooks, beginner'
+									placeholder='travel, vlog, japan'
 									value={keywords}
 									onChange={(e) => setKeywords(e.target.value)}
 									style={inputSt}
@@ -968,15 +1463,17 @@ export default function App() {
 							</div>
 							<button
 								onClick={() => {
-									setRawResults([]);
-									doSearch();
+									if (activeTab === 'bulk') doBulkSearch();
+									else if (activeTab === 'bulkKeyword') doBulkKeywordSearch();
+									else {
+										setRawResults([]);
+										doSearch();
+									}
 								}}
 								disabled={loading}
 								style={{
-									background: loading
-										? '#1e1e3a'
-										: 'linear-gradient(135deg,#6d28d9,#4f46e5)',
-									color: loading ? '#555' : '#fff',
+									background: loading ? T.btnDis : T.btnSearch,
+									color: loading ? T.btnDisTxt : '#fff',
 									border: 'none',
 									borderRadius: 10,
 									padding: '9px 22px',
@@ -993,7 +1490,7 @@ export default function App() {
 								{loading ? '⏳' : '🔍 Search'}
 							</button>
 						</div>
-						<p style={{ color: '#2a2a45', fontSize: 10, margin: '10px 0 0' }}>
+						<p style={{ color: T.textMid, fontSize: 10, margin: '10px 0 0' }}>
 							💡 যেকোনো একটা input দিলেই চলবে — বাকি সব optional
 						</p>
 					</div>
@@ -1001,11 +1498,11 @@ export default function App() {
 					{error && (
 						<div
 							style={{
-								background: '#1a0505',
-								border: '1px solid #7f1d1d',
+								background: T.errBg,
+								border: `1px solid ${T.errBorder}`,
 								borderRadius: 10,
 								padding: '10px 14px',
-								color: '#fca5a5',
+								color: T.errTxt,
 								marginBottom: 14,
 								fontSize: 13,
 							}}
@@ -1014,12 +1511,11 @@ export default function App() {
 						</div>
 					)}
 
-					{/* results */}
 					{searched && (
 						<div
 							style={{
-								background: '#0b0b16',
-								border: '1px solid #1c1c2e',
+								background: T.surface2,
+								border: `1px solid ${T.border2}`,
 								borderRadius: 14,
 								overflow: 'hidden',
 							}}
@@ -1030,61 +1526,109 @@ export default function App() {
 									justifyContent: 'space-between',
 									alignItems: 'center',
 									padding: '10px 14px',
-									borderBottom: '1px solid #1c1c2e',
-									background: '#0d0d1c',
+									borderBottom: `1px solid ${T.border2}`,
+									background: T.surface,
 									flexWrap: 'wrap',
 									gap: 8,
 								}}
 							>
-								<div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+								<div
+									style={{
+										display: 'flex',
+										alignItems: 'center',
+										gap: 8,
+										flexWrap: 'wrap',
+									}}
+								>
 									<span
-										style={{ color: '#6366f1', fontSize: 12, fontWeight: 700 }}
+										style={{ color: T.accent, fontSize: 12, fontWeight: 700 }}
 									>
 										{results.length} result{results.length !== 1 ? 's' : ''}
 									</span>
-									<span style={{ color: '#2a2a40' }}>|</span>
-									<span style={{ color: '#44445a', fontSize: 11 }}>Sort:</span>
+									{highlightCount > 0 && (
+										<>
+											<span style={{ color: T.border3 }}>|</span>
+											<span
+												style={{
+													background: T.pillHL,
+													color: T.pillHLText,
+													fontSize: 10,
+													padding: '2px 8px',
+													borderRadius: 5,
+													fontWeight: 700,
+													fontFamily: "'JetBrains Mono', monospace",
+												}}
+											>
+												✦ {highlightCount} keyword match
+												{highlightCount !== 1 ? 'es' : ''}
+											</span>
+										</>
+									)}
+									<span style={{ color: T.border3 }}>|</span>
+									<span style={{ color: T.textDim, fontSize: 11 }}>Sort:</span>
 									<SortBtn
 										label='Views'
 										field='views'
 										sortState={sort}
 										onSort={handleSort}
+										T={T}
+										isDark={darkMode}
 									/>
 									<SortBtn
 										label='Subscribers'
 										field='subs'
 										sortState={sort}
 										onSort={handleSort}
+										T={T}
+										isDark={darkMode}
 									/>
 								</div>
 								{results.length > 0 && (
-									<button
-										onClick={copyAll}
-										style={{
-											background: allCopied ? '#16a34a' : '#18181b',
-											color: allCopied ? '#fff' : '#a1a1aa',
-											border: `1px solid ${allCopied ? '#16a34a' : '#3f3f46'}`,
-											borderRadius: 6,
-											padding: '4px 12px',
-											fontSize: 11,
-											cursor: 'pointer',
-											fontFamily: "'JetBrains Mono', monospace",
-										}}
-									>
-										{allCopied ? '✓ Copied All!' : '📋 Copy All'}
-									</button>
+									<div style={{ display: 'flex', gap: 8 }}>
+										<button
+											onClick={() => exportToCSV(results)}
+											style={{
+												background: T.btnExport,
+												color: T.btnExportTxt,
+												border: `1px solid ${T.btnExportBorder}`,
+												borderRadius: 6,
+												padding: '4px 12px',
+												fontSize: 11,
+												cursor: 'pointer',
+												fontFamily: "'JetBrains Mono', monospace",
+												display: 'flex',
+												alignItems: 'center',
+												gap: 5,
+											}}
+										>
+											⬇ Export CSV
+										</button>
+										<button
+											onClick={copyAll}
+											style={{
+												background: allCopied ? T.btnCopied : T.btnCopy,
+												color: allCopied ? '#fff' : T.btnCopyTxt,
+												border: `1px solid ${allCopied ? T.btnCopied : T.btnCopyBorder}`,
+												borderRadius: 6,
+												padding: '4px 12px',
+												fontSize: 11,
+												cursor: 'pointer',
+												fontFamily: "'JetBrains Mono', monospace",
+											}}
+										>
+											{allCopied ? '✓ Copied All!' : '📋 Copy All'}
+										</button>
+									</div>
 								)}
 							</div>
-
-							{/* col headers */}
 							<div
 								style={{
 									display: 'grid',
 									gridTemplateColumns: '32px 1fr 130px 120px 80px 80px',
 									gap: 12,
 									padding: '7px 16px',
-									background: '#111127',
-									borderBottom: '1px solid #1c1c2e',
+									background: T.surface4,
+									borderBottom: `1px solid ${T.border2}`,
 								}}
 							>
 								{[
@@ -1098,7 +1642,7 @@ export default function App() {
 									<span
 										key={i}
 										style={{
-											color: '#44445a',
+											color: T.textDim,
 											fontSize: 9,
 											fontWeight: 700,
 											letterSpacing: 1,
@@ -1109,12 +1653,11 @@ export default function App() {
 									</span>
 								))}
 							</div>
-
 							{results.length === 0 ? (
 								<div
 									style={{
 										textAlign: 'center',
-										color: '#44445a',
+										color: T.textDim,
 										padding: 40,
 										fontSize: 13,
 									}}
@@ -1122,23 +1665,30 @@ export default function App() {
 									No results match your filters.
 								</div>
 							) : (
-								results.map((v, i) => <VideoRow key={v.id} v={v} idx={i} />)
+								results.map((v, i) => (
+									<VideoRow
+										key={v.id}
+										v={v}
+										idx={i}
+										isHighlighted={highlightedIds.has(v.id)}
+										T={T}
+									/>
+								))
 							)}
-
-							{nextPageToken && !loading && (
+							{nextPageToken && !loading && activeTab !== 'bulk' && (
 								<div
 									style={{
 										textAlign: 'center',
 										padding: 16,
-										borderTop: '1px solid #1c1c2e',
+										borderTop: `1px solid ${T.border2}`,
 									}}
 								>
 									<button
 										onClick={() => doSearch(nextPageToken)}
 										style={{
-											background: '#111127',
-											color: '#6366f1',
-											border: '1px solid #2a2a4a',
+											background: T.btnMore,
+											color: T.btnMoreTxt,
+											border: `1px solid ${T.btnMoreBorder}`,
 											borderRadius: 8,
 											padding: '7px 22px',
 											cursor: 'pointer',
@@ -1151,12 +1701,11 @@ export default function App() {
 									</button>
 								</div>
 							)}
-
 							{loading && (
 								<div
 									style={{
 										textAlign: 'center',
-										color: '#7c3aed',
+										color: T.accent2,
 										padding: 28,
 										fontSize: 18,
 									}}
@@ -1168,20 +1717,19 @@ export default function App() {
 					)}
 				</div>
 
-				{/* ── sidebar ── */}
+				{/* sidebar */}
 				<div
 					style={{
 						width: 200,
 						flexShrink: 0,
 						padding: '24px 16px 24px 0',
-						borderLeft: '1px solid #1c1c2e',
+						borderLeft: `1px solid ${T.border2}`,
 						paddingLeft: 16,
 					}}
 				>
-					{/* quota heading */}
 					<div
 						style={{
-							color: '#44445a',
+							color: T.textDim,
 							fontSize: 9,
 							fontWeight: 700,
 							letterSpacing: 1,
@@ -1190,31 +1738,20 @@ export default function App() {
 					>
 						API QUOTA
 					</div>
-					<QuotaCircle used={quotaUsed} total={DAILY_QUOTA} />
-
-					{/* reset button */}
-					<button
-						onClick={() => {
-							saveQuota(0);
-							setQuotaUsed(0);
-						}}
-						style={{
-							marginTop: 8,
-							width: '100%',
-							background: 'transparent',
-							border: '1px solid #2a2a40',
-							borderRadius: 6,
-							color: '#44445a',
-							fontSize: 10,
-							padding: '5px 0',
-							cursor: 'pointer',
-							fontFamily: 'inherit',
-						}}
-					>
-						↺ Reset counter
-					</button>
-
-					<SuggestionPanel />
+					{quotaLoaded ? (
+						<QuotaCircle used={quotaUsed} total={DAILY_QUOTA} T={T} />
+					) : (
+						<div
+							style={{
+								color: T.textDim,
+								fontSize: 11,
+								textAlign: 'center',
+								paddingTop: 20,
+							}}
+						>
+							Loading…
+						</div>
+					)}
 				</div>
 			</div>
 		</div>
